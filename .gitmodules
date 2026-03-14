@@ -1,0 +1,3 @@
+[submodule "thirdparty/nng"]
+	path = thirdparty/nng
+	url = https://github.com/nanomsg/nng/

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "cython>=3.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nng"
+version = "0.1.0"
+description = "High-performance Python bindings for nng (nanomsg-next-gen)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["nng", "nanomsg", "messaging", "zeromq"]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["nng"]
+
+[tool.scikit-build.cmake.define]
+NNG_TESTS = "OFF"
+NNG_TOOLS = "OFF"
+NNG_ENABLE_NNGCAT = "OFF"
+BUILD_SHARED_LIBS = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
