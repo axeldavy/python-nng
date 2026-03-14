@@ -8,13 +8,13 @@ import time
 
 from .._core.nng_import import import_nng
 from .base import BaseBenchmark
-from .._core.common import COMPETITORS
+from .._core.common import COMPETITORS, get_new_event_loop
 
 
 class NngAsyncBenchmark(BaseBenchmark):
     """Measures python-nng with async send/recv (asyncio)."""
 
-    name = "nng_async"
+    name = "nng_async_old"
 
     # ------------------------------------------------------------------
     # Internal server (runs its own asyncio loop in a thread)
@@ -23,6 +23,7 @@ class NngAsyncBenchmark(BaseBenchmark):
     @staticmethod
     def _server_thread(url: str, ready: threading.Event, stop: threading.Event) -> None:
         nng = import_nng()
+        asyncio.set_event_loop(get_new_event_loop())
 
         async def _serve() -> None:
             with nng.RepSocket() as rep:
@@ -52,6 +53,7 @@ class NngAsyncBenchmark(BaseBenchmark):
         n_iters: int,
     ) -> list[float]:
         nng = import_nng()
+        asyncio.set_event_loop(get_new_event_loop())
         payload = bytes(msg_size)
         ready = threading.Event()
         stop = threading.Event()
@@ -96,6 +98,7 @@ class NngAsyncBenchmark(BaseBenchmark):
         n_iters: int,
     ) -> list[float]:
         nng = import_nng()
+        asyncio.set_event_loop(get_new_event_loop())
         payload = bytes(msg_size)
         ready = threading.Event()
         stop = threading.Event()
@@ -140,6 +143,7 @@ class NngAsyncBenchmark(BaseBenchmark):
         duration_s: float,
     ) -> float:
         nng = import_nng()
+        asyncio.set_event_loop(get_new_event_loop())
         payload = bytes(msg_size)
         ready = threading.Event()
         stop = threading.Event()
@@ -169,4 +173,4 @@ class NngAsyncBenchmark(BaseBenchmark):
         return ops
 
 
-COMPETITORS["nng_async"] = NngAsyncBenchmark
+COMPETITORS["nng_async_old"] = NngAsyncBenchmark

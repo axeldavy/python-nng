@@ -129,7 +129,7 @@ cdef class Socket:
             reply = sock.recv()
     """
 
-    cdef nng_socket _sock
+    cdef shared_ptr[SocketHandle] _handle
     # Dict mapping int(nng_pipe_ev) → Python callable; kept alive as long as
     # the socket is open so the trampoline arg pointer stays valid.
     cdef object _pipe_cbs
@@ -144,28 +144,25 @@ cdef class Socket:
 
     def __cinit__(self):
         check_nng_init()
-        self._sock.id = 0
+        # _handle default-constructed (empty) by Cython's C++ member glue.
         self._pipe_cbs = {}
         self._dialers = []
         self._listeners = []
         self._fd_recv = -1
         self._fd_send = -1
 
-    def __dealloc__(self):
-        if self._sock.id != 0:
-            nng_socket_close(self._sock)   # best-effort in dealloc
-            self._sock.id = 0
+    # __dealloc__ intentionally omitted: shared_ptr[SocketHandle] destructor
+    # calls SocketHandle::~SocketHandle() -> nng_socket_close() when ref-count hits 0.
 
     cdef inline void _check(self) except *:
-        if self._sock.id == 0:
+        if not self._handle or not self._handle.get().is_open():
             raise NngClosed(NNG_ECLOSED, "Socket is closed")
 
     def close(self) -> None:
         """Close the socket and release all resources."""
-        if self._sock.id != 0:
+        if self._handle and self._handle.get().is_open():
             with nogil:
-                nng_socket_close(self._sock)
-            self._sock.id = 0
+                self._handle.get().close()
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
@@ -175,16 +172,16 @@ cdef class Socket:
     @property
     def id(self) -> int:
         """The underlying nng socket ID (positive) or 0 if closed."""
-        if self._sock.id == 0:
+        if not self._handle or not self._handle.get().is_open():
             return 0
-        return nng_socket_id(self._sock)
+        return nng_socket_id(self._handle.get().raw())
 
     @property
     def proto_name(self) -> str:
         """Protocol name (e.g. ``"pair1"``)."""
         self._check()
         cdef const char *name = NULL
-        check_err(nng_socket_proto_name(self._sock, &name))
+        check_err(nng_socket_proto_name(self._handle.get().raw(), &name))
         return name.decode("utf-8")
 
     @property
@@ -192,7 +189,7 @@ cdef class Socket:
         """Peer protocol name."""
         self._check()
         cdef const char *name = NULL
-        check_err(nng_socket_peer_name(self._sock, &name))
+        check_err(nng_socket_peer_name(self._handle.get().raw(), &name))
         return name.decode("utf-8")
 
     # ── Options ───────────────────────────────────────────────────────────
@@ -202,65 +199,65 @@ cdef class Socket:
         """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._sock, b"recv-timeout", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), b"recv-timeout", &v))
         return v
 
     @recv_timeout.setter
     def recv_timeout(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._sock, b"recv-timeout", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), b"recv-timeout", ms))
 
     @property
     def send_timeout(self) -> int:
         """Send timeout in ms."""
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._sock, b"send-timeout", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), b"send-timeout", &v))
         return v
 
     @send_timeout.setter
     def send_timeout(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._sock, b"send-timeout", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), b"send-timeout", ms))
 
     @property
     def recv_buf(self) -> int:
         """Receive buffer depth (number of queued messages)."""
         self._check()
         cdef int v
-        check_err(nng_socket_get_int(self._sock, b"recv-buffer", &v))
+        check_err(nng_socket_get_int(self._handle.get().raw(), b"recv-buffer", &v))
         return v
 
     @recv_buf.setter
     def recv_buf(self, int n):
         self._check()
-        check_err(nng_socket_set_int(self._sock, b"recv-buffer", n))
+        check_err(nng_socket_set_int(self._handle.get().raw(), b"recv-buffer", n))
 
     @property
     def send_buf(self) -> int:
         """Send buffer depth (number of queued messages)."""
         self._check()
         cdef int v
-        check_err(nng_socket_get_int(self._sock, b"send-buffer", &v))
+        check_err(nng_socket_get_int(self._handle.get().raw(), b"send-buffer", &v))
         return v
 
     @send_buf.setter
     def send_buf(self, int n):
         self._check()
-        check_err(nng_socket_set_int(self._sock, b"send-buffer", n))
+        check_err(nng_socket_set_int(self._handle.get().raw(), b"send-buffer", n))
 
     @property
     def recv_max_size(self) -> int:
         """Maximum incoming message size in bytes (0 = no limit)."""
         self._check()
         cdef size_t v
-        check_err(nng_socket_get_size(self._sock, b"recv-size-max", &v))
+        check_err(nng_socket_get_size(self._handle.get().raw(), b"recv-size-max", &v))
         return v
 
     @recv_max_size.setter
     def recv_max_size(self, size_t n):
         self._check()
-        check_err(nng_socket_set_size(self._sock, b"recv-size-max", n))
+        check_err(nng_socket_set_size(self._handle.get().raw(), b"recv-size-max", n))
 
     @property
     def recv_fd(self) -> int:
@@ -272,8 +269,12 @@ cdef class Socket:
         self._check()
         cdef int fd
         if self._fd_recv == -1:
-            check_err(nng_socket_get_recv_poll_fd(self._sock, &fd))
+            check_err(nng_socket_get_recv_poll_fd(self._handle.get().raw(), &fd))
             self._fd_recv = fd
+
+        if self._fd_recv == -1:
+            raise NngError(NNG_EINTERNAL, "Socket does not support recv polling")
+
         return self._fd_recv
 
     @property
@@ -285,8 +286,12 @@ cdef class Socket:
         self._check()
         cdef int fd
         if self._fd_send == -1:
-            check_err(nng_socket_get_send_poll_fd(self._sock, &fd))
+            check_err(nng_socket_get_send_poll_fd(self._handle.get().raw(), &fd))
             self._fd_send = fd
+
+        if self._fd_send == -1:
+            raise NngError(NNG_EINTERNAL, "Socket does not support send polling")
+
         return self._fd_send
 
     # ── Dialers and Listeners ─────────────────────────────────────────────
@@ -342,23 +347,21 @@ cdef class Socket:
         """
         self._check()
         cdef bytes b = _encode_url(url)
-        cdef nng_dialer d
-        check_err(nng_dialer_create(&d, self._sock, b))
-        try:
-            if tls is not None:
-                check_err(nng_dialer_set_tls(d, (<TlsConfig?>tls)._get_ptr()))
-            if reconnect_min_ms is not None:
-                check_err(nng_dialer_set_ms(d, b"reconnect-time-min", reconnect_min_ms))
-            if reconnect_max_ms is not None:
-                check_err(nng_dialer_set_ms(d, b"reconnect-time-max", reconnect_max_ms))
-            if recv_timeout is not None:
-                check_err(nng_dialer_set_ms(d, b"recv-timeout", recv_timeout))
-            if send_timeout is not None:
-                check_err(nng_dialer_set_ms(d, b"send-timeout", send_timeout))
-        except:
-            nng_dialer_close(d)
-            raise
-        obj = Dialer._from_id(d)
+        cdef int err = 0
+        cdef DialerHandle dh = make_dialer(self._handle, b, err)
+        check_err(err)
+        # Options: if any check_err raises, dh's destructor auto-calls nng_dialer_close.
+        if tls is not None:
+            check_err(dh.set_tls((<TlsConfig?>tls)._get_ptr()))
+        if reconnect_min_ms is not None:
+            check_err(dh.set_ms(b"reconnect-time-min", reconnect_min_ms))
+        if reconnect_max_ms is not None:
+            check_err(dh.set_ms(b"reconnect-time-max", reconnect_max_ms))
+        if recv_timeout is not None:
+            check_err(dh.set_ms(b"recv-timeout", recv_timeout))
+        if send_timeout is not None:
+            check_err(dh.set_ms(b"send-timeout", send_timeout))
+        cdef Dialer obj = Dialer.create(move(dh))
         self._dialers.append(obj)
         return obj
 
@@ -403,19 +406,17 @@ cdef class Socket:
         """
         self._check()
         cdef bytes b = _encode_url(url)
-        cdef nng_listener lst
-        check_err(nng_listener_create(&lst, self._sock, b))
-        try:
-            if tls is not None:
-                check_err(nng_listener_set_tls(lst, (<TlsConfig?>tls)._get_ptr()))
-            if recv_timeout is not None:
-                check_err(nng_listener_set_ms(lst, b"recv-timeout", recv_timeout))
-            if send_timeout is not None:
-                check_err(nng_listener_set_ms(lst, b"send-timeout", send_timeout))
-        except:
-            nng_listener_close(lst)
-            raise
-        obj = Listener._from_id(lst)
+        cdef int err = 0
+        cdef ListenerHandle lh = make_listener(self._handle, b, err)
+        check_err(err)
+        # Options: if any check_err raises, lh's destructor auto-calls nng_listener_close.
+        if tls is not None:
+            check_err(lh.set_tls((<TlsConfig?>tls)._get_ptr()))
+        if recv_timeout is not None:
+            check_err(lh.set_ms(b"recv-timeout", recv_timeout))
+        if send_timeout is not None:
+            check_err(lh.set_ms(b"send-timeout", send_timeout))
+        cdef Listener obj = Listener.create(move(lh))
         self._listeners.append(obj)
         return obj
 
@@ -443,7 +444,7 @@ cdef class Socket:
         cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
         cdef int rv
         with nogil:
-            rv = nng_send(self._sock, &mv[0], len(mv), flags)
+            rv = nng_send(self._handle.get().raw(), &mv[0], len(mv), flags)
 
         # Raise on errors
         check_err(rv)
@@ -463,7 +464,7 @@ cdef class Socket:
         cdef nng_msg *msg = NULL
         cdef int rv
         with nogil:
-            rv = nng_recvmsg(self._sock, &msg, flags)
+            rv = nng_recvmsg(self._handle.get().raw(), &msg, flags)
 
         # Raise on errors
         check_err(rv)
@@ -497,12 +498,11 @@ cdef class Socket:
         cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
         cdef int rv
         with nogil:
-            rv = nng_sendmsg(self._sock, ptr, flags)
+            rv = nng_sendmsg(self._handle.get().raw(), ptr, flags)
 
         # Raise on errors and restore message ownership
         if rv != 0:
-            msg._ptr = ptr
-            msg._owned = True
+            msg._handle.restore(ptr)
             check_err(rv)
 
     def recv_msg(self, *, bint nonblock=False) -> Message:
@@ -520,7 +520,7 @@ cdef class Socket:
         cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
         cdef int rv
         with nogil:
-            rv = nng_recvmsg(self._sock, &ptr, flags)
+            rv = nng_recvmsg(self._handle.get().raw(), &ptr, flags)
 
         # Raise on error
         check_err(rv)
@@ -552,7 +552,7 @@ cdef class Socket:
         # thread, avoiding thread dispatch.
         cdef int rv
         with nogil:
-            rv = nng_sendmsg(self._sock, ptr, NNG_FLAG_NONBLOCK)
+            rv = nng_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK)
 
         # On success the message is sent and we are done.
         if rv == NNG_OK:
@@ -570,7 +570,7 @@ cdef class Socket:
         msg = Message._from_ptr(ptr)
         """
 
-        cdef _AioOp op = _AioOp.create()
+        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
         op.set_payload(msg)
         op.set_msg(msg._steal_ptr())
 
@@ -578,7 +578,7 @@ cdef class Socket:
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_send(self._sock)
+        op.submit_socket_send(self._handle.get().raw())
 
         # Await completion
         try:
@@ -586,6 +586,9 @@ cdef class Socket:
         except _asyncio.CancelledError:
             op.on_future_cancel()
             raise
+        finally:
+            op.ensure_finish()
+            
 
     async def arecv(self) -> bytes:
         """Receive bytes asynchronously."""
@@ -599,7 +602,7 @@ cdef class Socket:
         cdef nng_msg *msg = NULL
         cdef int rv
         with nogil:
-            rv = nng_recvmsg(self._sock, &msg, NNG_FLAG_NONBLOCK)
+            rv = nng_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
 
         # On success the message is received and we can convert it to bytes and return.
         if rv == NNG_OK:
@@ -614,11 +617,11 @@ cdef class Socket:
             check_err(rv)
 
         # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioOp op = _AioOp.create()
+        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_recv(self._sock)
+        op.submit_socket_recv(self._handle.get().raw())
 
         # Await completion
         try:
@@ -626,6 +629,8 @@ cdef class Socket:
         except _asyncio.CancelledError:
             op.on_future_cancel()
             raise
+        finally:
+            op.ensure_finish()
 
         # Retrieve the message from the completed operation
         cdef nng_msg *ptr = op.get_msg()
@@ -649,7 +654,7 @@ cdef class Socket:
         # Fast path: non-blocking send — no task-pool dispatch.
         cdef int rv
         with nogil:
-            rv = nng_sendmsg(self._sock, ptr, NNG_FLAG_NONBLOCK)
+            rv = nng_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK)
 
         # On success the message is sent and we are done.
         if rv == NNG_OK:
@@ -667,7 +672,7 @@ cdef class Socket:
         msg = Message._from_ptr(ptr)
         """
 
-        cdef _AioOp op = _AioOp.create()
+        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
         op.set_payload(msg)
         op.set_msg(msg._steal_ptr())
 
@@ -675,7 +680,7 @@ cdef class Socket:
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_send(self._sock)
+        op.submit_socket_send(self._handle.get().raw())
 
         # Await completion
         try:
@@ -683,6 +688,8 @@ cdef class Socket:
         except _asyncio.CancelledError:
             op.on_future_cancel()
             raise
+        finally:
+            op.ensure_finish()
 
     async def arecv_msg(self):
         """Receive a Message asynchronously."""
@@ -692,18 +699,18 @@ cdef class Socket:
         cdef nng_msg *msg = NULL
         cdef int rv
         with nogil:
-            rv = nng_recvmsg(self._sock, &msg, NNG_FLAG_NONBLOCK)
+            rv = nng_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
         if rv == NNG_OK:
             return Message._from_ptr(msg)
         if rv != NNG_EAGAIN:
             check_err(rv)
 
         # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioOp op = _AioOp.create()
+        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_recv(self._sock)
+        op.submit_socket_recv(self._handle.get().raw())
 
         # Await completion
         try:
@@ -711,6 +718,8 @@ cdef class Socket:
         except _asyncio.CancelledError:
             op.on_future_cancel()
             raise
+        finally:
+            op.ensure_finish()
 
         # Retrieve the message from the completed operation
         cdef nng_msg *ptr = op.get_msg()
@@ -744,10 +753,13 @@ cdef class Socket:
         # Initialize fd_recv
         cdef int fd
         if self._fd_recv == -1:
-            check_err(nng_socket_get_recv_poll_fd(self._sock, &fd))
+            check_err(nng_socket_get_recv_poll_fd(self._handle.get().raw(), &fd))
             self._fd_recv = fd
         else:
             fd = self._fd_recv
+
+        if fd == -1:
+            raise NngError(NNG_EINTERNAL, "Socket does not support recv polling")
 
         loop = _asyncio.get_running_loop()
 
@@ -809,10 +821,13 @@ cdef class Socket:
         # Initialize fd_send
         cdef int fd
         if self._fd_send == -1:
-            check_err(nng_socket_get_send_poll_fd(self._sock, &fd))
+            check_err(nng_socket_get_send_poll_fd(self._handle.get().raw(), &fd))
             self._fd_send = fd
         else:
             fd = self._fd_send
+
+        if fd == -1:
+            raise NngError(NNG_EINTERNAL, "Socket does not support send polling")
 
         loop = _asyncio.get_running_loop()
 
@@ -881,13 +896,13 @@ cdef class Socket:
         # _pipe_cbs dict is kept alive by self; its address is stable as long
         # as we hold the reference.
         check_err(nng_pipe_notify(
-            self._sock,
+            self._handle.get().raw(),
             <nng_pipe_ev> event,
             _pipe_trampoline,
             <void *> self._pipe_cbs))
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(id={self._sock.id})"
+        return f"{type(self).__name__}(id={self._handle.get().raw().id if self._handle else 0})"
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -923,27 +938,29 @@ cdef class PairSocket(Socket):
     """
 
     def __cinit__(self, *, bint v0=False, bint poly=False, bint raw=False):
+        cdef nng_socket raw_sock
         if v0:
-            check_err(nng_pair0_open_raw(&self._sock) if raw
-                      else nng_pair0_open(&self._sock))
+            check_err(nng_pair0_open_raw(&raw_sock) if raw
+                      else nng_pair0_open(&raw_sock))
         elif poly:
-            check_err(nng_pair1_open_poly(&self._sock))
+            check_err(nng_pair1_open_poly(&raw_sock))
         else:
-            check_err(nng_pair1_open_raw(&self._sock) if raw
-                      else nng_pair1_open(&self._sock))
+            check_err(nng_pair1_open_raw(&raw_sock) if raw
+                      else nng_pair1_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
     @property
     def polyamorous(self) -> bool:
         """True if the socket is in polyamorous (fan-out) mode."""
         self._check()
         cdef cpp_bool v
-        check_err(nng_socket_get_bool(self._sock, b"pair1:polyamorous", &v))
+        check_err(nng_socket_get_bool(self._handle.get().raw(), b"pair1:polyamorous", &v))
         return bool(v)
 
     @polyamorous.setter
     def polyamorous(self, bint v):
         self._check()
-        check_err(nng_socket_set_bool(self._sock, b"pair1:polyamorous", v))
+        check_err(nng_socket_set_bool(self._handle.get().raw(), b"pair1:polyamorous", v))
 
 
 cdef class PubSocket(Socket):
@@ -962,8 +979,10 @@ cdef class PubSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_pub0_open_raw(&self._sock) if raw
-                  else nng_pub0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_pub0_open_raw(&raw_sock) if raw
+                  else nng_pub0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
 
 cdef class SubSocket(Socket):
@@ -990,8 +1009,10 @@ cdef class SubSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_sub0_open_raw(&self._sock) if raw
-                  else nng_sub0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_sub0_open_raw(&raw_sock) if raw
+                  else nng_sub0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
     def subscribe(self, prefix: bytes = b"") -> None:
         """Subscribe to messages whose body starts with *prefix*.
@@ -1001,14 +1022,14 @@ cdef class SubSocket(Socket):
         self._check()
         cdef const unsigned char[::1] mv = prefix
         check_err(nng_sub0_socket_subscribe(
-            self._sock, &mv[0] if len(mv) else NULL, len(mv)))
+            self._handle.get().raw(), &mv[0] if len(mv) else NULL, len(mv)))
 
     def unsubscribe(self, prefix: bytes = b"") -> None:
         """Remove a topic subscription."""
         self._check()
         cdef const unsigned char[::1] mv = prefix
         check_err(nng_sub0_socket_unsubscribe(
-            self._sock, &mv[0] if len(mv) else NULL, len(mv)))
+            self._handle.get().raw(), &mv[0] if len(mv) else NULL, len(mv)))
 
 
 cdef class ReqSocket(Socket):
@@ -1037,8 +1058,10 @@ cdef class ReqSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_req0_open_raw(&self._sock) if raw
-                  else nng_req0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_req0_open_raw(&raw_sock) if raw
+                  else nng_req0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
     @property
     def resend_time(self) -> int:
@@ -1052,13 +1075,13 @@ cdef class ReqSocket(Socket):
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._sock, b"req:resend-time", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), b"req:resend-time", &v))
         return v
 
     @resend_time.setter
     def resend_time(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._sock, b"req:resend-time", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), b"req:resend-time", ms))
 
     def open_context(self) -> Context:
         """Open an independent REQ context on this socket.
@@ -1069,7 +1092,7 @@ cdef class ReqSocket(Socket):
         without opening multiple sockets.
         """
         self._check()
-        return Context.create(self)
+        return Context.open(self)
 
 
 cdef class RepSocket(Socket):
@@ -1090,8 +1113,10 @@ cdef class RepSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_rep0_open_raw(&self._sock) if raw
-                  else nng_rep0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_rep0_open_raw(&raw_sock) if raw
+                  else nng_rep0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
     def open_context(self) -> Context:
         """Open an independent REP context on this socket.
@@ -1101,7 +1126,7 @@ cdef class RepSocket(Socket):
         from a single socket without a thread per client.
         """
         self._check()
-        return Context.create(self)
+        return Context.open(self)
 
 
 cdef class PushSocket(Socket):
@@ -1119,8 +1144,10 @@ cdef class PushSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_push0_open_raw(&self._sock) if raw
-                  else nng_push0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_push0_open_raw(&raw_sock) if raw
+                  else nng_push0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
 
 cdef class PullSocket(Socket):
@@ -1135,8 +1162,10 @@ cdef class PullSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_pull0_open_raw(&self._sock) if raw
-                  else nng_pull0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_pull0_open_raw(&raw_sock) if raw
+                  else nng_pull0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
 
 cdef class SurveyorSocket(Socket):
@@ -1153,8 +1182,10 @@ cdef class SurveyorSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_surveyor0_open_raw(&self._sock) if raw
-                  else nng_surveyor0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_surveyor0_open_raw(&raw_sock) if raw
+                  else nng_surveyor0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
     @property
     def survey_time(self) -> int:
@@ -1166,18 +1197,18 @@ cdef class SurveyorSocket(Socket):
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._sock, b"surveyor:survey-time", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), b"surveyor:survey-time", &v))
         return v
 
     @survey_time.setter
     def survey_time(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._sock, b"surveyor:survey-time", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), b"surveyor:survey-time", ms))
 
     def open_context(self) -> Context:
         """Open an independent surveyor context on this socket."""
         self._check()
-        return Context.create(self)
+        return Context.open(self)
 
 
 cdef class RespondentSocket(Socket):
@@ -1190,13 +1221,15 @@ cdef class RespondentSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_respondent0_open_raw(&self._sock) if raw
-                  else nng_respondent0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_respondent0_open_raw(&raw_sock) if raw
+                  else nng_respondent0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)
 
     def open_context(self) -> Context:
         """Open an independent respondent context on this socket."""
         self._check()
-        return Context.create(self)
+        return Context.open(self)
 
 
 cdef class BusSocket(Socket):
@@ -1216,5 +1249,7 @@ cdef class BusSocket(Socket):
     """
 
     def __cinit__(self, *, bint raw=False):
-        check_err(nng_bus0_open_raw(&self._sock) if raw
-                  else nng_bus0_open(&self._sock))
+        cdef nng_socket raw_sock
+        check_err(nng_bus0_open_raw(&raw_sock) if raw
+                  else nng_bus0_open(&raw_sock))
+        self._handle = make_shared[SocketHandle](raw_sock)

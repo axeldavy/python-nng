@@ -50,6 +50,7 @@ _ALL_COMPETITORS = [
     "c_nng",
     "nng_sync",
     "nng_async",
+    "nng_async_old",
     "zmq_sync",
     "zmq_async",
     "pynng_sync",

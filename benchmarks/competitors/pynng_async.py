@@ -9,7 +9,7 @@ import time
 import pynng
 
 from .base import BaseBenchmark
-from .._core.common import COMPETITORS
+from .._core.common import COMPETITORS, get_new_event_loop
 
 # pynng's native async uses trio. It ships an anyio-compatible interface
 # via pynng.Socket.arecv()/asend() when called inside asyncio as well,
@@ -28,6 +28,8 @@ class PynngAsyncBenchmark(BaseBenchmark):
 
     @staticmethod
     def _server_thread(url: str, ready: threading.Event, stop: threading.Event) -> None:
+        asyncio.set_event_loop(get_new_event_loop())
+
         async def _serve() -> None:
             with pynng.Rep0(listen=url, recv_timeout=200) as rep:
                 ready.set()
@@ -51,6 +53,7 @@ class PynngAsyncBenchmark(BaseBenchmark):
         n_warmup: int,
         n_iters: int,
     ) -> list[float]:
+        asyncio.set_event_loop(get_new_event_loop())
         payload = bytes(msg_size)
         ready = threading.Event()
         stop = threading.Event()
@@ -93,6 +96,7 @@ class PynngAsyncBenchmark(BaseBenchmark):
         n_warmup: int,
         n_iters: int,
     ) -> list[float]:
+        asyncio.set_event_loop(get_new_event_loop())
         payload = bytes(msg_size)
         ready = threading.Event()
         stop = threading.Event()
@@ -134,6 +138,7 @@ class PynngAsyncBenchmark(BaseBenchmark):
         msg_size: int,
         duration_s: float,
     ) -> float:
+        asyncio.set_event_loop(get_new_event_loop())
         payload = bytes(msg_size)
         ready = threading.Event()
         stop = threading.Event()

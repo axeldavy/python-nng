@@ -23,6 +23,7 @@ from ._core.stats import Stats, compute_stats
 _COMPETITOR_MODULES = [
     "benchmarks.competitors.nng_sync",
     "benchmarks.competitors.nng_async",
+    "benchmarks.competitors.nng_async_old",
     "benchmarks.competitors.zmq_sync",
     "benchmarks.competitors.zmq_async",
     "benchmarks.competitors.pynng_sync",
@@ -41,6 +42,7 @@ def _import_competitors(requested: list[str]) -> None:
         name_map = {
             "nng_sync": "nng_sync",
             "nng_async": "nng_async",
+            "nng_async_old": "nng_async_old",
             "zmq_sync": "zmq_sync",
             "zmq_async": "zmq_async",
             "pynng_sync": "pynng_sync",

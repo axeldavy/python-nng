@@ -41,7 +41,7 @@ def _competitors_ordered(data: dict[str, Stats]) -> list[str]:
     """Return competitor names in deterministic order."""
     prefer = [
         "c_nng",
-        "nng_sync", "nng_async",
+        "nng_sync", "nng_async", "nng_async_old",
         "zmq_sync", "zmq_async",
         "pynng_sync", "pynng_async",
     ]

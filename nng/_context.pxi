@@ -18,46 +18,49 @@ cdef class Context:
         ctx.close() # optional
     """
 
-    cdef nng_ctx   _ctx
-    cdef bint      _open
-    cdef object    _socket # to prevent socket from being deallocated
+    cdef shared_ptr[ContextHandle] _handle
 
     def __cinit__(self):
         check_nng_init()
-        self._open = False
-        self._socket = None
+        # _handle default-constructed (empty) by Cython's C++ member glue.
 
     def __init__(self):
         raise RuntimeError("Context cannot be instantiated directly. Use Socket.open_context() instead.")
 
-    def __dealloc__(self):
-        if self._open:
-            nng_ctx_close(self._ctx)
-            self._open = False
+    # __dealloc__ intentionally omitted: shared_ptr[ContextHandle] destructor
+    # calls ContextHandle::~ContextHandle() -> nng_ctx_close() when refcount hits 0.
+    # AioHandle holds a copy of this shared_ptr while a context-level async
+    # operation is in flight, ensuring the context outlives the operation.
 
     @staticmethod
-    cdef Context create(Socket socket):
+    cdef Context create(shared_ptr[ContextHandle] ch):
+        """Take ownership of an already-created ContextHandle."""
         cdef Context context = Context.__new__(Context)
-        check_err(nng_ctx_open(&context._ctx, socket._sock))
-        context._open = True
-        context._socket = socket
+        context._handle = ch
         return context
 
+    @staticmethod
+    cdef Context open(Socket socket):
+        """Open a new context on *socket* and return a Context wrapping it."""
+        cdef int err = 0
+        cdef shared_ptr[ContextHandle] ch = make_context(socket._handle, err)
+        check_err(err)
+        return Context.create(ch)
+
     cdef inline void _check(self) except *:
-        if not self._open:
+        if not self._handle or not self._handle.get().is_open():
             raise NngClosed(NNG_ECLOSED, "Context is closed")
 
     def close(self) -> None:
-        if self._open:
-            check_err(nng_ctx_close(self._ctx))
-            self._open = False
+        if self._handle and self._handle.get().is_open():
+            check_err(self._handle.get().close())
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
 
     @property
     def id(self) -> int:
-        return nng_ctx_id(self._ctx)
+        return nng_ctx_id(self._handle.get().raw())
 
     # ── Synchronous send / recv ────────────────────────────────────────────
 
@@ -71,12 +74,11 @@ cdef class Context:
         # Send message
         cdef int rv
         with nogil:
-            rv = nng_ctx_sendmsg(self._ctx, ptr, NNG_FLAG_NONBLOCK if nonblock else 0)
+            rv = nng_ctx_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK if nonblock else 0)
 
         # Handle failure
         if rv != 0:
-            msg._ptr   = ptr
-            msg._owned = True
+            msg._handle.restore(ptr)
             check_err(rv)
 
     def recv_msg(self, *, bint nonblock = False) -> Message:
@@ -87,7 +89,7 @@ cdef class Context:
         cdef nng_msg *ptr = NULL
         cdef int rv
         with nogil:
-            rv = nng_ctx_recvmsg(self._ctx, &ptr, NNG_FLAG_NONBLOCK if nonblock else 0)
+            rv = nng_ctx_recvmsg(self._handle.get().raw(), &ptr, NNG_FLAG_NONBLOCK if nonblock else 0)
 
         # Handle failure
         check_err(rv)
@@ -117,7 +119,7 @@ cdef class Context:
         # nng — no task-pool dispatch, no cross-thread wakeups (~200–500 ns).
         cdef int rv
         with nogil:
-            rv = nng_ctx_sendmsg(self._ctx, ptr, NNG_FLAG_NONBLOCK)
+            rv = nng_ctx_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK)
 
         # On success the message is sent and we are done.
         if rv == NNG_OK:
@@ -127,15 +129,14 @@ cdef class Context:
         # On any other error the message was not sent; restore ownership to the caller's Message
         # object before raising.
         if rv != NNG_EAGAIN:
-            msg._ptr   = ptr
-            msg._owned = True
+            msg._handle.restore(ptr)
             check_err(rv)
 
         # Slow path: re-wrap the ptr (nng did not take it on EAGAIN).
         msg = Message._from_ptr(ptr)
         """
 
-        cdef _AioOp op = _AioOp.create()
+        cdef _AioOp op = _AioOp.create_for_context(self._handle)
         op.set_payload(msg)
         op.set_msg(msg._steal_ptr())
 
@@ -143,7 +144,7 @@ cdef class Context:
         future = op.get_future()
 
         # Submit the operation
-        op.submit_ctx_send(self._ctx)
+        op.submit_ctx_send(self._handle.get().raw())
 
         # Await completion
         try:
@@ -151,6 +152,8 @@ cdef class Context:
         except _asyncio.CancelledError:
             op.on_future_cancel()
             raise
+        finally:
+            op.ensure_finish()
 
     async def arecv_msg(self):
         """Receive a Message asynchronously through this context."""
@@ -161,7 +164,7 @@ cdef class Context:
         cdef nng_msg *msg = NULL
         cdef int rv
         with nogil:
-            rv = nng_ctx_recvmsg(self._ctx, &msg, NNG_FLAG_NONBLOCK)
+            rv = nng_ctx_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
 
         # On success the message is received and we can convert it to bytes and return.
         if rv == NNG_OK:
@@ -173,13 +176,13 @@ cdef class Context:
             check_err(rv)
 
         # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioOp op = _AioOp.create()
+        cdef _AioOp op = _AioOp.create_for_context(self._handle)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
 
         # Submit the operation
-        op.submit_ctx_recv(self._ctx)
+        op.submit_ctx_recv(self._handle.get().raw())
 
         # Await completion
         try:
@@ -187,6 +190,8 @@ cdef class Context:
         except _asyncio.CancelledError:
             op.on_future_cancel()
             raise
+        finally:
+            op.ensure_finish()
 
         # Retrieve the message from the completed operation
         cdef nng_msg *ptr = op.get_msg()
@@ -202,51 +207,32 @@ cdef class Context:
         """Receive bytes asynchronously through this context."""
         return (await self.arecv_msg()).to_bytes()
 
-    # ── Poll-fd readiness helpers ─────────────────────────────────────────
-
-    def arecv_ready(self):
-        """Async generator that yields each time the context's socket has a message ready.
-
-        Delegates to :meth:`Socket.arecv_ready` on the owning socket — contexts
-        share the socket-level poll fds.  See that method for full documentation.
-        """
-        self._check()
-        return (<Socket> self._socket).arecv_ready()
-
-    def asend_ready(self):
-        """Async generator that yields each time the context's socket can accept a send.
-
-        Delegates to :meth:`Socket.asend_ready` on the owning socket — contexts
-        share the socket-level poll fds.  See that method for full documentation.
-        """
-        self._check()
-        return (<Socket> self._socket).asend_ready()
-
     # ── Options ───────────────────────────────────────────────────────────
 
     @property
     def recv_timeout(self) -> int:
         self._check()
         cdef nng_duration v
-        check_err(nng_ctx_get_ms(self._ctx, b"recv-timeout", &v))
+        check_err(nng_ctx_get_ms(self._handle.get().raw(), b"recv-timeout", &v))
         return v
 
     @recv_timeout.setter
     def recv_timeout(self, int ms):
         self._check()
-        check_err(nng_ctx_set_ms(self._ctx, b"recv-timeout", ms))
+        check_err(nng_ctx_set_ms(self._handle.get().raw(), b"recv-timeout", ms))
 
     @property
     def send_timeout(self) -> int:
         self._check()
         cdef nng_duration v
-        check_err(nng_ctx_get_ms(self._ctx, b"send-timeout", &v))
+        check_err(nng_ctx_get_ms(self._handle.get().raw(), b"send-timeout", &v))
         return v
 
     @send_timeout.setter
     def send_timeout(self, int ms):
         self._check()
-        check_err(nng_ctx_set_ms(self._ctx, b"send-timeout", ms))
+        check_err(nng_ctx_set_ms(self._handle.get().raw(), b"send-timeout", ms))
 
     def __repr__(self) -> str:
-        return f"Context(id={nng_ctx_id(self._ctx)}, open={self._open})"
+        cdef bint is_open = self._handle.get() != NULL and self._handle.get().is_open()
+        return f"Context(id={nng_ctx_id(self._handle.get().raw()) if is_open else 0}, open={is_open})"

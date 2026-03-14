@@ -23,7 +23,8 @@ file(GLOB NNG_CYTHON_DEPS
     ${CMAKE_CURRENT_SOURCE_DIR}/nng/*.pyx
     ${CMAKE_CURRENT_SOURCE_DIR}/nng/*.pxd
     ${CMAKE_CURRENT_SOURCE_DIR}/nng/*.pxi
-    ${CMAKE_CURRENT_SOURCE_DIR}/nng/*.h)
+    ${CMAKE_CURRENT_SOURCE_DIR}/nng/*.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/nng/cpp/*.hpp)
 
 add_custom_command(
     OUTPUT  ${NNG_C_OUT}
@@ -31,6 +32,7 @@ add_custom_command(
             -3
             --cplus
             --output-file ${NNG_C_OUT}
+            -I ${CMAKE_CURRENT_SOURCE_DIR}
             -I ${CMAKE_CURRENT_SOURCE_DIR}/nng
             ${NNG_PYX}
     DEPENDS ${NNG_CYTHON_DEPS}
@@ -38,10 +40,14 @@ add_custom_command(
 
 Python_add_library(_nng MODULE WITH_SOABI ${NNG_C_OUT})
 
+set_target_properties(_nng PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
 target_link_libraries(_nng PRIVATE nng)
 
 # nng only exports its includes post-install; provide the build-tree path too
+# The project root is included so that "nng/cpp/socket.hpp" etc. resolve correctly.
 target_include_directories(_nng PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/nng
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nng/include)
 

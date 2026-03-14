@@ -31,20 +31,21 @@ cdef class Dialer:
             ...
     """
 
-    cdef nng_dialer _d
+    cdef DialerHandle _handle
 
     def __cinit__(self):
         check_nng_init()
-        self._d.id = 0
+        # _handle default-constructed (empty) by Cython's C++ member glue.
 
     @staticmethod
-    cdef Dialer _from_id(nng_dialer d):
+    cdef Dialer create(DialerHandle dh):
+        """Take ownership of an already-created DialerHandle."""
         cdef Dialer dialer = Dialer.__new__(Dialer)
-        dialer._d = d
+        dialer._handle = move(dh)
         return dialer
 
     cdef inline void _check(self) except *:
-        if self._d.id == 0:
+        if not self._handle.is_open():
             raise NngClosed(NNG_ECLOSED, "Dialer is closed")
 
     def close(self) -> None:
@@ -54,9 +55,8 @@ cdef class Dialer:
         Any in-flight sends or receives on that pipe will fail.  The parent
         socket remains open and its other pipes are unaffected.
         """
-        if self._d.id != 0:
-            check_err(nng_dialer_close(self._d))
-            self._d.id = 0
+        if self._handle.is_open():
+            check_err(self._handle.close())
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
@@ -64,7 +64,7 @@ cdef class Dialer:
     @property
     def id(self) -> int:
         """The numeric dialer ID, or 0 if the dialer has been closed."""
-        return nng_dialer_id(self._d)
+        return self._handle.id()
 
     # ── Options (read-only; set via Socket.add_dialer) ────────────────────
 
@@ -77,7 +77,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_dialer_get_ms(self._d, b"recv-timeout", &v))
+        check_err(self._handle.get_ms(b"recv-timeout", &v))
         return v
 
     @property
@@ -89,7 +89,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_dialer_get_ms(self._d, b"send-timeout", &v))
+        check_err(self._handle.get_ms(b"send-timeout", &v))
         return v
 
     @property
@@ -103,7 +103,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_dialer_get_ms(self._d, b"reconnect-time-min", &v))
+        check_err(self._handle.get_ms(b"reconnect-time-min", &v))
         return v
 
     @property
@@ -116,7 +116,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_dialer_get_ms(self._d, b"reconnect-time-max", &v))
+        check_err(self._handle.get_ms(b"reconnect-time-max", &v))
         return v
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -139,11 +139,11 @@ cdef class Dialer:
         cdef int flags = 0 if block else NNG_FLAG_NONBLOCK
         cdef int rv
         with nogil:
-            rv = nng_dialer_start(self._d, flags)
+            rv = self._handle.start(flags)
         check_err(rv)
 
     def __repr__(self) -> str:
-        return f"Dialer(id={self._d.id})"
+        return f"Dialer(id={self._handle.id() if self._handle.is_open() else 0})"
 
 
 cdef class Listener:
@@ -172,20 +172,21 @@ cdef class Listener:
             ...
     """
 
-    cdef nng_listener _l
+    cdef ListenerHandle _handle
 
     def __cinit__(self):
         check_nng_init()
-        self._l.id = 0
+        # _handle default-constructed (empty) by Cython's C++ member glue.
 
     @staticmethod
-    cdef Listener _from_id(nng_listener l):
+    cdef Listener create(ListenerHandle lh):
+        """Take ownership of an already-created ListenerHandle."""
         cdef Listener listener = Listener.__new__(Listener)
-        listener._l = l
+        listener._handle = move(lh)
         return listener
 
     cdef inline void _check(self) except *:
-        if self._l.id == 0:
+        if not self._handle.is_open():
             raise NngClosed(NNG_ECLOSED, "Listener is closed")
 
     def close(self) -> None:
@@ -195,9 +196,8 @@ cdef class Listener:
         closed immediately.  The parent socket remains open and any pipes from
         *other* listeners or dialers continue operating normally.
         """
-        if self._l.id != 0:
-            check_err(nng_listener_close(self._l))
-            self._l.id = 0
+        if self._handle.is_open():
+            check_err(self._handle.close())
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
@@ -205,7 +205,7 @@ cdef class Listener:
     @property
     def id(self) -> int:
         """The numeric listener ID, or 0 if the listener has been closed."""
-        return nng_listener_id(self._l)
+        return self._handle.id()
 
     # ── Options (read-only; set via Socket.add_listener) ────────────────────
 
@@ -218,7 +218,7 @@ cdef class Listener:
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_listener_get_ms(self._l, b"recv-timeout", &v))
+        check_err(self._handle.get_ms(b"recv-timeout", &v))
         return v
 
     @property
@@ -230,7 +230,7 @@ cdef class Listener:
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_listener_get_ms(self._l, b"send-timeout", &v))
+        check_err(self._handle.get_ms(b"send-timeout", &v))
         return v
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -245,8 +245,8 @@ cdef class Listener:
         self._check()
         cdef int rv
         with nogil:
-            rv = nng_listener_start(self._l, 0)
+            rv = self._handle.start()
         check_err(rv)
 
     def __repr__(self) -> str:
-        return f"Listener(id={self._l.id})"
+        return f"Listener(id={self._handle.id() if self._handle.is_open() else 0})"

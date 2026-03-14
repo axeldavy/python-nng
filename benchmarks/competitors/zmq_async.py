@@ -10,7 +10,7 @@ import zmq
 import zmq.asyncio as azmq
 
 from .base import BaseBenchmark
-from .._core.common import COMPETITORS
+from .._core.common import COMPETITORS, get_new_event_loop
 
 # zmq.asyncio requires an asyncio event loop to be running. For inproc the
 # context must be shared between server and client coroutines — both run in
@@ -106,6 +106,7 @@ class ZmqAsyncBenchmark(BaseBenchmark):
     # ------------------------------------------------------------------
 
     def _run_in_loop(self, coro) -> list[float] | float:
+        asyncio.set_event_loop(get_new_event_loop())
         return asyncio.run(coro)
 
     def measure_latency(

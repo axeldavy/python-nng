@@ -15,6 +15,7 @@
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int32_t, int16_t
 from libc.stddef cimport size_t
 from libc.string cimport memset
+from libcpp.utility cimport move
 from cpython.buffer cimport PyBUF_FORMAT, Py_buffer
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
@@ -22,6 +23,9 @@ cimport cython
 
 # Pull in all the corrected C declarations
 from nng._decls cimport *
+
+# Pull in the C++ RAII handle classes and shared_ptr/make_shared
+from nng._cpp cimport *
 
 # Pull in the C trampoline header (ensures nng.h + Python.h are both visible)
 cdef extern from "_trampoline.h":

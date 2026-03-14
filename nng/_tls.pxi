@@ -1,7 +1,8 @@
 # nng/_tls.pxi – included into _nng.pyx
 #
-# TlsConfig: wraps nng_tls_config* (reference-counted by nng).
-# TlsCert:   wraps nng_tls_cert_s* (owned by this object).
+# TlsConfig: wraps nng_tls_config* via a C++ TlsConfigHandle (RAII).
+# Lifetime is managed by a shared_ptr so the config cannot be freed before
+# any Dialer/Listener that references it.
 
 cdef class TlsConfig:
     """TLS configuration object.
@@ -18,27 +19,31 @@ cdef class TlsConfig:
         dialer.set_tls(cfg)
     """
 
-    cdef nng_tls_config *_cfg
+    cdef unique_ptr[TlsConfigHandle] _handle
 
     def __cinit__(self, bint server=False):
+        # _handle default-constructed (empty) by Cython's C++ member glue.
+        pass
+
+    def __init__(self, bint server=False):
         check_nng_init()
+        cdef int err = 0
         cdef nng_tls_mode mode = <nng_tls_mode>(NNG_TLS_MODE_SERVER if server
                                                 else NNG_TLS_MODE_CLIENT)
-        check_err(nng_tls_config_alloc(&self._cfg, mode))
+        self._handle = TlsConfigHandle.alloc(mode, err)
+        check_err(err)
 
-    def __dealloc__(self):
-        if self._cfg != NULL:
-            nng_tls_config_free(self._cfg)
-            self._cfg = NULL
+    # __dealloc__ intentionally omitted: unique_ptr[TlsConfigHandle] destructor
+    # calls TlsConfigHandle::~TlsConfigHandle() → nng_tls_config_free().
 
     cdef inline void _check(self) except *:
-        if self._cfg == NULL:
+        if not self._handle or not self._handle.get().is_valid():
             raise NngClosed(NNG_ECLOSED, "TlsConfig is closed")
 
     # ── Hold / free (for use by Dialer / Listener internally) ─────────────
     cdef nng_tls_config *_get_ptr(self) except NULL:
         self._check()
-        return self._cfg
+        return self._handle.get().get()
 
     # ── Configuration ─────────────────────────────────────────────────────
 
@@ -46,7 +51,7 @@ cdef class TlsConfig:
         """Set the expected server name (SNI + verification)."""
         self._check()
         cdef bytes b = name.encode("utf-8")
-        check_err(nng_tls_config_server_name(self._cfg, b))
+        check_err(nng_tls_config_server_name(self._handle.get().get(), b))
         return self
 
     def ca_chain(self, cert_pem: str, crl_pem: str = None) -> TlsConfig:
@@ -55,7 +60,7 @@ cdef class TlsConfig:
         cdef bytes bc = cert_pem.encode("utf-8")
         cdef bytes br = crl_pem.encode("utf-8") if crl_pem else None
         check_err(nng_tls_config_ca_chain(
-            self._cfg, bc, <const char *>(br) if br else NULL))
+            self._handle.get().get(), bc, <const char *>(br) if br else NULL))
         return self
 
     def own_cert(self,
@@ -68,14 +73,14 @@ cdef class TlsConfig:
         cdef bytes bk = key_pem.encode("utf-8")
         cdef bytes bp = password.encode("utf-8") if password else None
         check_err(nng_tls_config_own_cert(
-            self._cfg, bc, bk, <const char *>(bp) if bp else NULL))
+            self._handle.get().get(), bc, bk, <const char *>(bp) if bp else NULL))
         return self
 
     def ca_file(self, path: str) -> TlsConfig:
         """Load a CA certificate chain from a file."""
         self._check()
         cdef bytes b = path.encode("utf-8")
-        check_err(nng_tls_config_ca_file(self._cfg, b))
+        check_err(nng_tls_config_ca_file(self._handle.get().get(), b))
         return self
 
     def cert_key_file(self, path: str, password: str = None) -> TlsConfig:
@@ -84,27 +89,28 @@ cdef class TlsConfig:
         cdef bytes bp = path.encode("utf-8")
         cdef bytes bpw = password.encode("utf-8") if password else None
         check_err(nng_tls_config_cert_key_file(
-            self._cfg, bp, <const char *>(bpw) if bpw else NULL))
+            self._handle.get().get(), bp, <const char *>(bpw) if bpw else NULL))
         return self
 
     def auth_mode(self, int mode) -> TlsConfig:
         """Set peer verification mode (NNG_TLS_AUTH_MODE_*)."""
         self._check()
         check_err(nng_tls_config_auth_mode(
-            self._cfg, <nng_tls_auth_mode>mode))
+            self._handle.get().get(), <nng_tls_auth_mode>mode))
         return self
 
     def version(self, int min_ver, int max_ver) -> TlsConfig:
         """Restrict the allowed TLS versions (NNG_TLS_1_2 / NNG_TLS_1_3)."""
         self._check()
         check_err(nng_tls_config_version(
-            self._cfg,
+            self._handle.get().get(),
             <nng_tls_version>min_ver,
             <nng_tls_version>max_ver))
         return self
 
     def __repr__(self) -> str:
-        return f"TlsConfig({'valid' if self._cfg != NULL else 'closed'})"
+        cdef bint valid = self._handle.get() != NULL and self._handle.get().is_valid()
+        return f"TlsConfig({'valid' if valid else 'closed'})"
 
 
 # ── TLS auth-mode and version constants (re-exported at module level) ─────────
