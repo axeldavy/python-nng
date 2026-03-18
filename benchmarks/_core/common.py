@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 import sys
@@ -63,7 +64,6 @@ def get_new_event_loop():
         import uvloop
         return uvloop.new_event_loop()
     except ImportError:
-        import asyncio
         return asyncio.SelectorEventLoop()
 
 def run_in_new_loop(coro):

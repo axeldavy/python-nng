@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import select
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -80,20 +81,31 @@ def _ensure_built() -> _Bins:
 def _wait_for_ready(proc: subprocess.Popen, timeout: float = 10.0) -> None:
     """Wait until the server prints 'READY' on stdout.
 
-    Uses select() to avoid blocking the deadline loop on readline().
-    Surfaces stderr in the error message when the server exits unexpectedly.
+    Reads stdout in a daemon thread feeding a Queue so that the main thread
+    can apply a deadline without blocking on readline().  This also works on
+    Windows where select() cannot be used with subprocess pipe handles.
     """
+    line_q: queue.Queue[str] = queue.Queue()
+
+    def _reader() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line_q.put(line)
+        except Exception:
+            pass
+
+    threading.Thread(target=_reader, daemon=True).start()
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
-        # select() lets us honour the deadline without blocking on readline()
-        ready, _, _ = select.select([proc.stdout], [], [], min(0.2, remaining))
-        if ready:
-            line = proc.stdout.readline()
+        try:
+            line = line_q.get(timeout=min(0.2, remaining))
             if line.strip() == "READY":
                 return
-            if not line:  # EOF — process already exited
-                break
+        except queue.Empty:
+            pass
         if proc.poll() is not None:
             stderr_out = proc.stderr.read().strip() if proc.stderr else ""
             raise RuntimeError(

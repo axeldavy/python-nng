@@ -66,6 +66,8 @@ class NngAsyncBenchmark(BaseBenchmark):
                         pass
                     except nng.NngClosed:
                         break
+                await arecv_ready.aclose()
+                await asend_ready.aclose()
 
         run_in_new_loop(_serve())
 
@@ -102,6 +104,8 @@ class NngAsyncBenchmark(BaseBenchmark):
                     msg = req.recv()
                     t1 = time.perf_counter()
                     samples.append((t1 - t0) * 1e6)
+                await arecv_ready.aclose()
+                await asend_ready.aclose()
             return samples
 
         return run_in_new_loop(_client())
@@ -132,6 +136,8 @@ class NngAsyncBenchmark(BaseBenchmark):
                     await anext(arecv_ready)
                     msg = req.recv(nonblock=True)
                     count += 1
+                await arecv_ready.aclose()
+                await asend_ready.aclose()
             return count / duration_s
 
         return run_in_new_loop(_client())
