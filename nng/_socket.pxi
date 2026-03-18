@@ -974,6 +974,7 @@ cdef class Socket:
                 # or equivalently:
                 # await watcher.__anext__()
                 # data = sock.recv(nonblock=True)
+            await watcher.aclose()
         """
         self._check()
 
@@ -1042,6 +1043,7 @@ cdef class Socket:
                 msg = sock.recv(nonblock=True)
                 await send_watcher.__anext__()
                 sock.send(reply, nonblock=True)
+            await send_watcher.aclose()
         """
         self._check()
 
