@@ -1261,12 +1261,12 @@ cdef class SubSocket(Socket):
         dropped instead.
         """
         self._check()
-        cdef int v
+        cdef cpp_bool v
         check_err(nng_socket_get_bool(self._handle.get().raw(), b"sub:prefnew", &v))
-        return v != 0
+        return bool(v)
 
     @skip_older_on_full_queue.setter
-    def skip_older_on_full_queue(self, bool skip_older):
+    def skip_older_on_full_queue(self, bint skip_older):
         self._check()
         check_err(nng_socket_set_bool(self._handle.get().raw(), b"sub:prefnew", skip_older))
 

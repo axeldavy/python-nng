@@ -29,6 +29,7 @@
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int32_t, int16_t
 from libc.stddef cimport size_t
 from libc.string cimport memset, memcpy
+from libcpp cimport bool as cpp_bool
 from libcpp.utility cimport move
 from cpython.buffer cimport PyBUF_FORMAT, Py_buffer
 
@@ -227,12 +228,12 @@ def _aio_dispatch_loop():
     Drains _dispatch_queue and _pipe_event_queue without holding the GIL
     during the wait, so nng's callback threads are never blocked on Python.
     """
-    cdef uint64_t op_id
-    cdef bint got
-    cdef uint32_t psid
-    cdef uint32_t ppid
-    cdef int pev
-    cdef bint pgot
+    cdef uint64_t op_id = 0
+    cdef bint got = False
+    cdef uint32_t psid = 0
+    cdef uint32_t ppid = 0
+    cdef int pev = 0
+    cdef bint pgot = False
 
     while True:
         # 1. Non-blocking drain: pick up all AIO completions.

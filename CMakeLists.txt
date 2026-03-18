@@ -51,9 +51,6 @@ target_include_directories(_nng PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/nng
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nng/include)
 
-# GCC 14 promoted -Wincompatible-pointer-types to an error.
-# Cython-generated C code relies on implicit PyObject*/extension-type-ptr
-# conversions that are valid but trigger this warning.
-target_compile_options(_nng PRIVATE -Wno-incompatible-pointer-types)
+target_compile_options(_nng PRIVATE)
 
 install(TARGETS _nng DESTINATION nng)
