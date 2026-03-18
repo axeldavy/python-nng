@@ -6,6 +6,7 @@ import json
 import select
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -25,14 +26,18 @@ class _Bins(NamedTuple):
     inproc_ops: Path
 
 
+# On Windows executables have a .exe suffix; on POSIX there is no suffix.
+_EXE: str = ".exe" if sys.platform == "win32" else ""
+
+
 def _ensure_built() -> _Bins:
     """Build the C nng benchmarks if not already built and return binary paths."""
     bins = _Bins(
-        server     = C_BUILD_DIR / "bench_server",
-        client_lat = C_BUILD_DIR / "bench_client_lat",
-        client_ops = C_BUILD_DIR / "bench_client_ops",
-        inproc_lat = C_BUILD_DIR / "bench_inproc_lat",
-        inproc_ops = C_BUILD_DIR / "bench_inproc_ops",
+        server     = C_BUILD_DIR / f"bench_server{_EXE}",
+        client_lat = C_BUILD_DIR / f"bench_client_lat{_EXE}",
+        client_ops = C_BUILD_DIR / f"bench_client_ops{_EXE}",
+        inproc_lat = C_BUILD_DIR / f"bench_inproc_lat{_EXE}",
+        inproc_ops = C_BUILD_DIR / f"bench_inproc_ops{_EXE}",
     )
 
     if all(p.exists() for p in bins):
@@ -50,12 +55,15 @@ def _ensure_built() -> _Bins:
             "-S", str(C_NNG_DIR),
             "-B", str(C_BUILD_DIR),
             "-DCMAKE_BUILD_TYPE=Release",
+            # Single-config generators (Makefile/Ninja) use CMAKE_RUNTIME_OUTPUT_DIRECTORY.
+            # Multi-config generators (Visual Studio) require the per-config override.
             f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={C_BUILD_DIR}",
+            f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE={C_BUILD_DIR}",
         ],
         check=True,
     )
     subprocess.run(
-        ["cmake", "--build", str(C_BUILD_DIR), "--parallel"],
+        ["cmake", "--build", str(C_BUILD_DIR), "--config", "Release", "--parallel"],
         check=True,
     )
 

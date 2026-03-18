@@ -64,7 +64,7 @@ def get_new_event_loop():
         return uvloop.new_event_loop()
     except ImportError:
         import asyncio
-        return asyncio.new_event_loop()
+        return asyncio.SelectorEventLoop()
 
 def run_in_new_loop(coro):
     """Run the given coroutine in a new event loop, returning the result."""

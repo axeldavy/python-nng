@@ -66,8 +66,8 @@ async def _ipc_serve(path: str, ready, stop: threading.Event) -> None:  # type: 
             while True:
                 header = await reader.readexactly(4)
                 size = int.from_bytes(header, "big")
-                body = await reader.readexactly(size)
-                writer.write(body)
+                await reader.readexactly(size)
+                writer.write(b"\x00")
                 await writer.drain()
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
@@ -108,7 +108,7 @@ async def _ipc_latency(
             t0 = perf_counter()
             writer.write(payload)
             await writer.drain()
-            await reader.readexactly(msg_size)
+            await reader.readexactly(1)
             t1 = perf_counter()
             if i >= n_warmup:
                 samples.append((t1 - t0) * 1e6)
@@ -131,7 +131,7 @@ async def _ipc_ops(path: str, msg_size: int, duration_s: float) -> float:
         while perf_counter() < t_end:
             writer.write(payload)
             await writer.drain()
-            await reader.readexactly(msg_size)
+            await reader.readexactly(1)
             count += 1
     finally:
         writer.close()
@@ -162,8 +162,8 @@ async def _tcp_serve(host: str, port: int, ready, stop: threading.Event | None) 
             while True:
                 header = await reader.readexactly(4)
                 size = int.from_bytes(header, "big")
-                body = await reader.readexactly(size)
-                writer.write(body)
+                await reader.readexactly(size)
+                writer.write(b"\x00")
                 await writer.drain()
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
@@ -192,7 +192,7 @@ async def _tcp_latency(
             t0 = perf_counter()
             writer.write(payload)
             await writer.drain()
-            await reader.readexactly(msg_size)
+            await reader.readexactly(1)
             t1 = perf_counter()
             if i >= n_warmup:
                 samples.append((t1 - t0) * 1e6)
@@ -214,7 +214,7 @@ async def _tcp_ops(host: str, port: int, msg_size: int, duration_s: float) -> fl
         while perf_counter() < t_end:
             writer.write(payload)
             await writer.drain()
-            await reader.readexactly(msg_size)
+            await reader.readexactly(1)
             count += 1
     finally:
         writer.close()
