@@ -1,10 +1,8 @@
-"""Benchmark competitor: pynng async REQ/REP.
+"""Benchmark competitor: python-nng async REQ/REP via asend/arecv.
 
-This demo is similar to nng_async2.py, but uses
-pynng's asyncio support instead of python-nng.
-
-To this date, python-nng gets higher performance, mainly due
-to compiled C++ (Cython) code for the asyncio machinery, while pynng is pure Python/ffi.
+asend/arecv are the recommended way to do asynchronous send/recv with python-nng.
+They are slightly slower than arecv_ready/asend_ready, but have fewer potential
+pitfalls to handle.
 """
 
 from __future__ import annotations
@@ -13,33 +11,37 @@ import asyncio
 import threading
 import time
 
-import pynng
-
+from .._core.nng_import import import_nng
 from .base import BaseBenchmark
 from .._core.common import COMPETITORS, run_in_new_loop
 
 
-class PynngAsyncBenchmark(BaseBenchmark):
-    """Measures pynng async send/recv (asyncio)."""
+class NngAsyncBenchmark(BaseBenchmark):
+    """Measures python-nng with async send/recv (asyncio)."""
 
-    name = "pynng_async"
+    name = "nng_async2"
 
     # ------------------------------------------------------------------
-    # Server (asyncio)
+    # Internal server (runs its own asyncio loop in a thread)
     # ------------------------------------------------------------------
 
     @classmethod
     def run_server(cls, url: str, ready, stop) -> None:
+        nng = import_nng()
 
         async def _serve() -> None:
-            with pynng.Rep0(listen=url, recv_timeout=200) as rep:
+            with nng.RepSocket() as rep:
+                rep.recv_timeout = 200
+                rep.add_listener(url).start()
                 ready.set()
                 while not stop.is_set():
                     try:
                         msg = await rep.arecv()
-                        await rep.asend(b" ")
-                    except pynng.exceptions.Timeout:
+                        await rep.asend(b"")
+                    except nng.NngTimeout:
                         pass
+                    except nng.NngClosed:
+                        break
 
         run_in_new_loop(_serve())
 
@@ -54,11 +56,13 @@ class PynngAsyncBenchmark(BaseBenchmark):
         n_warmup: int,
         n_iters: int,
     ) -> list[float]:
+        nng = import_nng()
         payload = bytes(msg_size)
 
         async def _client() -> list[float]:
             samples: list[float] = []
-            with pynng.Req0(dial=transport_url) as req:
+            with nng.ReqSocket() as req:
+                req.add_dialer(transport_url).start(block=True)
                 for _ in range(n_warmup):
                     await req.asend(payload)
                     await req.arecv()
@@ -82,11 +86,13 @@ class PynngAsyncBenchmark(BaseBenchmark):
         msg_size: int,
         duration_s: float,
     ) -> float:
+        nng = import_nng()
         payload = bytes(msg_size)
 
         async def _client() -> float:
             count = 0
-            with pynng.Req0(dial=transport_url) as req:
+            with nng.ReqSocket() as req:
+                req.add_dialer(transport_url).start(block=True)
                 deadline = time.perf_counter() + duration_s
                 while time.perf_counter() < deadline:
                     await req.asend(payload)
@@ -97,4 +103,4 @@ class PynngAsyncBenchmark(BaseBenchmark):
         return run_in_new_loop(_client())
 
 
-COMPETITORS["pynng_async"] = PynngAsyncBenchmark
+COMPETITORS["nng_async2"] = NngAsyncBenchmark

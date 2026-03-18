@@ -436,6 +436,7 @@ cdef extern from "nng/nng.h":
     int  nng_tls_config_ca_file    (nng_tls_config *, const char *)        nogil
     int  nng_tls_config_cert_key_file(nng_tls_config *, const char *, const char *) nogil
     int  nng_tls_config_version    (nng_tls_config *, nng_tls_version, nng_tls_version) nogil
+    int  nng_tls_config_psk        (nng_tls_config *, const char *, const uint8_t *, size_t) nogil
 
     # ── TLS cert ──────────────────────────────────────────────────────────────
     nng_err nng_tls_cert_parse_pem(nng_tls_cert_s **, const char *, size_t) nogil

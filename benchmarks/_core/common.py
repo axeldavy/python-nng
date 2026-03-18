@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 
 # ---------------------------------------------------------------------------
 # Message sizes to sweep (bytes)
@@ -64,3 +65,14 @@ def get_new_event_loop():
     except ImportError:
         import asyncio
         return asyncio.new_event_loop()
+
+def run_in_new_loop(coro):
+    """Run the given coroutine in a new event loop, returning the result."""
+    sys.setswitchinterval(1e-6) # Switch gil frequently to not penalize threading aspects of the benchmarks
+
+    loop = get_new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()

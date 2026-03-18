@@ -10,7 +10,7 @@ from libcpp.memory cimport shared_ptr, make_shared, unique_ptr, make_unique
 from nng._decls cimport (
     nng_socket, nng_ctx, nng_dialer, nng_listener,
     nng_msg, nng_aio, nng_tls_config, nng_tls_mode,
-    nng_pipe, nng_duration
+    nng_pipe, nng_duration, nng_sockaddr
 )
 
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int32_t, int16_t
@@ -39,6 +39,7 @@ cdef extern from "nng/cpp/message.hpp" namespace "nng_cpp" nogil:
         void*  body_ptr()
         void   clear()
         int    reserve(size_t n)
+        int    resize(size_t n)
         int    append(const void* data, size_t len)
         int    insert(const void* data, size_t len)
         int    trim(size_t n)
@@ -62,11 +63,32 @@ cdef extern from "nng/cpp/message.hpp" namespace "nng_cpp" nogil:
         # dup / pipe
         MessageHandle dup(int& err)
         nng_pipe get_pipe()
+        # equality
+        bint operator==(const MessageHandle& o)
+        bint operator!=(const MessageHandle& o)
         # static factories (return by value)
         @staticmethod
         MessageHandle alloc(size_t size, int& err)
         @staticmethod
         MessageHandle alloc_with_data(const void* data, size_t len, int& err)
+
+# ── PipeHandle ───────────────────────────────────────────────────────────────
+
+cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
+    cppclass PipeHandle:
+        PipeHandle()
+        PipeHandle(nng_pipe p)
+        nng_pipe     get()
+        int          get_id()
+        bint         is_valid()
+        int          close()
+        nng_dialer   get_dialer()
+        nng_listener get_listener()
+        nng_socket   get_socket()
+        int          peer_addr(nng_sockaddr& sa)
+        int          self_addr(nng_sockaddr& sa)
+        bint operator==(const PipeHandle& o)
+        bint operator!=(const PipeHandle& o)
 
 # ── TlsConfigHandle ───────────────────────────────────────────────────────────
 
@@ -142,3 +164,24 @@ cdef extern from "nng/cpp/aio.hpp" namespace "nng_cpp" nogil:
         void mark_callback_thread()
         nng_aio* get()
         bint is_valid()
+
+# ── DispatchQueue ──────────────────────────────────────────────────────────────
+
+cdef extern from "nng/cpp/dispatch.hpp" namespace "nng_cpp" nogil:
+    cppclass DispatchQueue:
+        DispatchQueue()
+        void push(uint64_t id)
+        bint get_ready(uint64_t& id)
+        bint wait_for(uint64_t& id, int timeout_ms)
+        void stop()
+        bint is_stopped()
+
+# ── PipeEventQueue ─────────────────────────────────────────────────────────────
+
+cdef extern from "nng/cpp/pipe_notif.hpp" namespace "nng_cpp" nogil:
+    cppclass PipeEventQueue:
+        PipeEventQueue()
+        void push(uint32_t sock_id, uint32_t pipe_id, int ev)
+        bint get_ready(uint32_t& sock_id, uint32_t& pipe_id, int& ev)
+        void stop()
+        bint is_stopped()

@@ -13,7 +13,7 @@ Spawns:
 nng distributes each outgoing request to whichever server pipe is ready first,
 spreading the load without any manual routing logic.
 
-Total messages exchanged: N × K  (spread across M servers).
+Total messages exchanged: N x K  (spread across M servers).
 
 Usage
 -----

@@ -1,169 +1,234 @@
 # nng/_aio.pxi – included into _nng.pyx
 #
 # _AioOp – internal class managing one in-flight async nng operation.
+#
+# Callback flow (two-part trampoline):
+#
+#   Part 1 – _aio_trampoline()   (nng thread, NO GIL)
+#     • mark_callback_thread() so AioHandle can choose reap vs free
+#     • push id(op) to _dispatch_queue  ← only thing done here
+#
+#   Part 2 – _AioOp._dispatch_complete()   (dispatcher thread, GIL held)
+#     • nng_aio_result() to get the error code
+#     • resolve asyncio Future via loop.call_soon_threadsafe()
+#     • Py_DECREF(self) to balance the Py_INCREF taken at submit time
 
 import asyncio as _asyncio
-from traceback import print_exc as _print_exc
+import concurrent.futures as _concurrent_futures
 
-from cpython.ref cimport Py_INCREF, Py_DECREF
 cimport cython
 
+# ── Part 1: GIL-free trampoline ───────────────────────────────────────────────
+
 cdef void _aio_trampoline(void *arg) noexcept nogil:
-    """Called by nng's internal thread pool when an async operation finishes."""
-    (<_AioOp>arg).on_complete()
+    """Called by nng's thread pool on op completion – no GIL, no Python."""
+    # Push only the object address as an integer; no Python state touched.
+    _dispatch_queue.push(<uint64_t><void*>arg)
+
+# ── asyncio helpers (called from dispatcher thread via call_soon_threadsafe) ──
 
 def _set_future_done(fut):
-    """Helper to set an asyncio Future as done from the trampoline."""
+    """Resolve an asyncio Future successfully (must run on the loop thread)."""
     if not fut.done():
         fut.set_result(None)
 
 def _set_future_exception(fut, exc):
-    """Helper to set an asyncio Future exception from the trampoline."""
+    """Resolve an asyncio Future with an error (must run on the loop thread)."""
     if not fut.done():
         fut.set_exception(exc)
+
+# ── _AioOp ────────────────────────────────────────────────────────────────────
 
 @cython.final
 cdef class _AioOp:
     """One in-flight async nng operation."""
 
     cdef unique_ptr[AioHandle] _handle
-    cdef object _loop     # asyncio event loop
-    cdef object _future   # asyncio.Future
-    cdef object _payload  # keep Message / bytes alive during the operation
+    cdef object _loop      # asyncio event loop (None for concurrent-future mode)
+    cdef object _future    # asyncio.Future or concurrent.futures.Future
+    cdef bint   _has_result  # False: return None, True: return Message
 
     def __cinit__(self):
-        # _handle default-constructed (empty) by Cython's C++ member glue.
-        self._loop    = None
-        self._future  = None
-        self._payload = None
+        # _handle is default-constructed (empty) by Cython's C++ member glue.
+        self._loop        = None
+        self._future      = None
+        self._has_result  = False
 
     def __init__(self):
         raise RuntimeError("_AioOp cannot be instantiated directly")
 
     def __dealloc__(self):
-        self._future = None
-        self._loop = None
-        self._payload = None
-        # unique_ptr[AioHandle] destructor calls AioHandle::~AioHandle()
-        # which selects nng_aio_reap or nng_aio_free based on the thread id
-        # recorded by mark_callback_thread(). No manual free needed here.
+        self._future  = None
+        self._loop    = None
+
+    # ── Factory methods ───────────────────────────────────────────────────
 
     @staticmethod
     cdef _AioOp create_for_socket(shared_ptr[SocketHandle] anchor):
-        """Allocate a new _AioOp anchored to *anchor* (a SocketHandle).
-
-        The anchor is passed directly to the AioHandle constructor so the
-        socket cannot be closed before the in-flight async operation completes.
-        """
+        """Allocate a new _AioOp anchored to *anchor* (a SocketHandle)."""
         check_nng_init()
         cdef _AioOp op = _AioOp.__new__(_AioOp)
 
+        # Retrieve loop
         op._loop   = _asyncio.get_running_loop()
         if op._loop is None:
             raise RuntimeError("No running event loop found")
+
+        # Create the future that will be resolved on completion
         op._future = op._loop.create_future()
 
+        # Initialize the aio
         cdef nng_aio *raw_aio = NULL
-        check_err(nng_aio_alloc(&raw_aio, _aio_trampoline, <void *> op))
+        check_err(nng_aio_alloc(&raw_aio, _aio_trampoline, <void *>op))
         op._handle = make_unique[AioHandle](raw_aio, anchor)
-
         return op
 
     @staticmethod
     cdef _AioOp create_for_context(shared_ptr[ContextHandle] anchor):
-        """Allocate a new _AioOp anchored to *anchor* (a ContextHandle).
+        """Allocate a new _AioOp anchored to *anchor* (a ContextHandle)."""
+        check_nng_init()
+        cdef _AioOp op = _AioOp.__new__(_AioOp)
 
-        The anchor is passed directly to the AioHandle constructor so the
-        context (and its parent socket) cannot be closed before the in-flight
-        async operation completes.
+        # Retrieve loop
+        op._loop   = _asyncio.get_running_loop()
+        if op._loop is None:
+            raise RuntimeError("No running event loop found")
+
+        # Create the future that will be resolved on completion
+        op._future = op._loop.create_future()
+
+        # Initialize the aio
+        cdef nng_aio *raw_aio = NULL
+        check_err(nng_aio_alloc(&raw_aio, _aio_trampoline, <void *>op))
+        op._handle = make_unique[AioHandle](raw_aio, anchor)
+        return op
+
+    @staticmethod
+    cdef _AioOp create_for_socket_concurrent(shared_ptr[SocketHandle] anchor,
+                                             bint has_result):
+        """Allocate a _AioOp for a socket op returning a concurrent.futures.Future.
         """
         check_nng_init()
         cdef _AioOp op = _AioOp.__new__(_AioOp)
 
-        op._loop   = _asyncio.get_running_loop()
-        if op._loop is None:
-            raise RuntimeError("No running event loop found")
-        op._future = op._loop.create_future()
+        # Initialize the future
+        op._has_result = has_result
+        op._future = _concurrent_futures.Future()
+        op._future.add_done_callback(op._on_cancel)
 
+        # Initialize the aio
         cdef nng_aio *raw_aio = NULL
-        check_err(nng_aio_alloc(&raw_aio, _aio_trampoline, <void *> op))
+        check_err(nng_aio_alloc(&raw_aio, _aio_trampoline, <void *>op))
         op._handle = make_unique[AioHandle](raw_aio, anchor)
-
         return op
 
-    cdef void on_complete(self) noexcept nogil:
-        """Resolve the asyncio Future from any thread (called with GIL held)."""
-        # Record which thread is running the callback (for safe dealloc later)
-        self._handle.get().mark_callback_thread()
+    @staticmethod
+    cdef _AioOp create_for_context_concurrent(shared_ptr[ContextHandle] anchor,
+                                              bint has_result):
+        """Allocate a _AioOp for a context op returning a concurrent.futures.Future.
+        """
+        check_nng_init()
+        cdef _AioOp op = _AioOp.__new__(_AioOp)
 
-        # Retrieve operation completion status
-        cdef int err = nng_aio_result(self._handle.get().get())
+        # Initialize the future
+        op._has_result = has_result
+        op._future = _concurrent_futures.Future()
+        op._future.add_done_callback(op._on_cancel)
 
-        with gil:
-            try:
-                # Clear references to loop, future, and payload
-                fut = self._future
-                loop = self._loop
-                self._future = None
-                self._loop = None
-                self._payload = None
+        # Initialize the aio
+        cdef nng_aio *raw_aio = NULL
+        check_err(nng_aio_alloc(&raw_aio, _aio_trampoline, <void *>op))
+        op._handle = make_unique[AioHandle](raw_aio, anchor)
+        return op
 
-                # Check item is still valid (interpreted exit)
-                if loop is None or fut is None:
-                    return
+    # ── Cancellation bridge ───────────────────────────────────────────────
 
-                # Report completion
-                if err == NNG_OK:
-                    loop.call_soon_threadsafe(_set_future_done, fut)
+    def _on_cancel(self, fut):
+        """Done-callback registered on a concurrent.futures.Future.
+
+        Fires on any terminal state; only acts when the future was cancelled
+        so that the underlying nng aio is also cancelled.
+        """
+        if fut.cancelled():
+            self.on_future_cancel()
+
+    # ── Part 2: dispatcher-thread completion handler ──────────────────────
+
+    def _dispatch_complete(self):
+        """Resolve the future; called by the dispatcher thread (GIL held).
+
+        nng_aio_result() is safe to call here: by the time the dispatcher runs
+        this, the callback has already returned and the result is stable.
+        """
+        cdef int err
+        cdef nng_msg *recv_msg_ptr
+
+        fut  = self._future
+        loop = self._loop
+        self._future  = None
+        self._loop    = None
+
+        if fut is None:
+            return
+
+        err = nng_aio_result(self._handle.get().get())
+
+        if loop is not None:
+            # asyncio mode: schedule on the event-loop thread.
+            # the asyncio recv methods retrieve the message themselves after await.
+            if err == NNG_OK:
+                loop.call_soon_threadsafe(_set_future_done, fut)
+            else:
+                loop.call_soon_threadsafe(
+                    _set_future_exception, fut, _err_from_code(err))
+        else:
+            # concurrent.futures mode: set_result/set_exception are thread-safe.
+            if not fut.done():
+                if err != NNG_OK:
+                    fut.set_exception(_err_from_code(err))
+                elif not self._has_result:
+                    fut.set_result(None)
                 else:
-                    exc = _err_from_code(err)
-                    loop.call_soon_threadsafe(_set_future_exception, fut, exc)
+                    recv_msg_ptr = nng_aio_get_msg(self._handle.get().get())
+                    if recv_msg_ptr == NULL:
+                        fut.set_exception(
+                            NngError(NNG_EINTERNAL, "No message in AIO after recv"))
+                    fut.set_result(Message._from_ptr(recv_msg_ptr))
 
-            # Print any unexpected exceptions but don't let them propagate out of the trampoline
-            except BaseException:
-                _print_exc()
-
-            # Clear callback reference
-            finally:
-                Py_DECREF(self)
-
-    ## Editing the aio before submission
+    # ── Pre-submission helpers ────────────────────────────────────────────
 
     cdef inline void set_timeout(self, int32_t ms) noexcept nogil:
         """Set the timeout for this operation (in milliseconds)."""
         nng_aio_set_timeout(self._handle.get().get(), ms)
 
-    cdef void set_payload(self, object payload) noexcept:
-        """Keep *payload* (Message / bytes) alive for the duration of the op."""
-        self._payload = payload
-
     cdef void set_msg(self, nng_msg *ptr) noexcept nogil:
         """Attach an nng_msg to the underlying aio (for send operations)."""
         nng_aio_set_msg(self._handle.get().get(), ptr)
 
-    ## Retrieving results from the aio after completion
+    # ── Post-completion helpers ───────────────────────────────────────────
 
-    cdef nng_msg *get_msg(self):
+    cdef nng_msg *get_msg(self) noexcept:
         """Retrieve the received nng_msg from the aio (for recv operations).
 
         Returns NULL if no message is present.
         """
-        with nogil:
-            return nng_aio_get_msg(self._handle.get().get())
+        return nng_aio_get_msg(self._handle.get().get())
 
-    ## aio submission
+    # ── Submission ────────────────────────────────────────────────────────
 
     cdef void _prepare_submit(self):
-        """Mark as in-flight (must call immediately before the nng op).
-        
-        Must be called just before submission
+        """Register the completion callable and keep op alive until dispatch.
+
+        Must be called (with the GIL held) immediately before the nng call.
         """
-        # NOTE: we may use a weakref in the trampoline instead
-        Py_INCREF(self)
+        global _dispatch_callables
+
+        # Register the dispatch callable keyed by this object's address.
+        _dispatch_callables[id(self)] = self._dispatch_complete
 
     cdef void _cancel_submit(self):
-        """Unmark as in-flight (must call if the op is cancelled before submission)."""
-        Py_DECREF(self)
+        """Undo _prepare_submit() if a submit is aborted before the nng call."""
+        _dispatch_callables.pop(id(self), None)
 
     cdef void submit_socket_send(self, nng_socket sock):
         """Submit this op as a socket send."""
@@ -190,26 +255,23 @@ cdef class _AioOp:
             nng_ctx_recv(ctx, self._handle.get().get())
 
     cdef object get_future(self):
-        """Return the asyncio Future associated with this operation.
-        
-        May return None if the callback has already been called
-        and references cleared, in which case the operation is already complete.
-        Thus call before submission.
+        """Return the Future associated with this operation.
+
+        Retrieve before submission; after submission the field may be cleared
+        by the dispatcher at any time.
         """
         return self._future
 
     cdef void on_future_cancel(self):
-        """Cancel the in-flight operation (must call if the Future is cancelled)."""
+        """Cancel the in-flight operation when the caller's Future is cancelled."""
         with nogil:
             nng_aio_cancel(self._handle.get().get())
-
-            # Wait for cancellation to complete before returning
-            # While this does not seem required, it is probably
-            # safer.
+            # Wait so that on_future_cancel() returns only after the trampoline
+            # has fired (and thus the id is already in the dispatch queue).
             nng_aio_wait(self._handle.get().get())
 
     cdef ensure_finish(self):
-        """Wait for the operation to finish executing the callback."""
+        """Block until the trampoline has fired (and the id queued)."""
         if not nng_aio_busy(self._handle.get().get()):
             return
         with nogil:

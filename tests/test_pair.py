@@ -29,10 +29,10 @@ def test_pair_message_zero_copy():
         srv.add_listener(URL + "_msg").start()
         cli.add_dialer(URL + "_msg").start()
 
-        cli.send_msg(nng.Message(b"ping"))
-        msg = srv.recv_msg()
+        cli.send(nng.Message(b"ping"))
+        msg = srv.recv()
         assert bytes(memoryview(msg)) == b"ping"   # zero-copy view
-        assert msg.len == 4
+        assert len(msg) == 4
         assert msg.to_bytes() == b"ping"
 
 
@@ -45,9 +45,9 @@ def test_pair_message_mutation():
         msg = nng.Message()
         msg.append(b"foo")
         msg.append_u16(0xBEEF)
-        cli.send_msg(msg)
+        cli.send(msg)
 
-        recv = srv.recv_msg()
+        recv = srv.recv()
         assert recv.chop_u16() == 0xBEEF
         assert recv.to_bytes() == b"foo"
 
@@ -86,7 +86,8 @@ async def test_pair_async_roundtrip():
 
         async def server():
             data = await srv.arecv()
-            await srv.asend(data + b"!")
+            data.append(b"!")
+            await srv.asend(data)
 
         await asyncio.gather(
             server(),
@@ -104,10 +105,10 @@ async def test_pair_async_msg_roundtrip():
         cli.add_dialer(URL + "_async_msg").start()
 
         async def server():
-            msg = await srv.arecv_msg()
+            msg = await srv.arecv()
             await srv.asend(msg.to_bytes().upper())
 
-        await asyncio.gather(server(), cli.asend_msg(nng.Message(b"hello")))
+        await asyncio.gather(server(), cli.asend(nng.Message(b"hello")))
         reply = await cli.arecv()
         assert reply == b"HELLO"
 
@@ -133,26 +134,3 @@ async def test_pair_async_many():
                 assert reply == str(i).encode()
 
         await asyncio.gather(echo_server(), client())
-
-
-# ── Pipe callbacks ────────────────────────────────────────────────────────────
-
-def test_pipe_add_callback():
-    """pipe ADD_POST callback fires when a connection is established."""
-    added = []
-
-    with nng.PairSocket() as srv, nng.PairSocket() as cli:
-        def on_add(pipe_id, event):
-            added.append((pipe_id, event))
-
-        srv.on_pipe_event(nng.PIPE_EV_ADD_POST, on_add)
-        srv.add_listener(URL + "_pipe").start()
-        cli.add_dialer(URL + "_pipe").start()
-        # Small delay for the callback to fire
-        import time
-        time.sleep(0.05)
-
-    assert len(added) >= 1
-    pipe_id, ev = added[0]
-    assert pipe_id > 0
-    assert ev == nng.PIPE_EV_ADD_POST

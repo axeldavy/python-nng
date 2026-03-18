@@ -1,4 +1,4 @@
-"""Benchmark competitor: C nng binaries (bench_server + bench_client)."""
+"""Benchmark competitor: C nng binaries (bench_server + bench_client_*)."""
 
 from __future__ import annotations
 
@@ -8,19 +8,35 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from .base import BaseBenchmark
 from .._core.common import COMPETITORS, C_NNG_DIR, C_BUILD_DIR
 from .._core.stats import Stats, compute_stats_from_c_json
 
 
-def _ensure_built() -> tuple[Path, Path]:
-    """Build the C nng benchmarks if not already built.  Returns (server_bin, client_bin)."""
-    server_bin = C_BUILD_DIR / "bench_server"
-    client_bin = C_BUILD_DIR / "bench_client"
+class _Bins(NamedTuple):
+    """Paths to the compiled C benchmark binaries."""
 
-    if server_bin.exists() and client_bin.exists():
-        return server_bin, client_bin
+    server: Path
+    client_lat: Path
+    client_ops: Path
+    inproc_lat: Path
+    inproc_ops: Path
+
+
+def _ensure_built() -> _Bins:
+    """Build the C nng benchmarks if not already built and return binary paths."""
+    bins = _Bins(
+        server     = C_BUILD_DIR / "bench_server",
+        client_lat = C_BUILD_DIR / "bench_client_lat",
+        client_ops = C_BUILD_DIR / "bench_client_ops",
+        inproc_lat = C_BUILD_DIR / "bench_inproc_lat",
+        inproc_ops = C_BUILD_DIR / "bench_inproc_ops",
+    )
+
+    if all(p.exists() for p in bins):
+        return bins
 
     print("  [c_nng] Building C nng benchmarks …")
     C_BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,13 +59,14 @@ def _ensure_built() -> tuple[Path, Path]:
         check=True,
     )
 
-    if not server_bin.exists() or not client_bin.exists():
+    missing = [p.name for p in bins if not p.exists()]
+    if missing:
         raise RuntimeError(
-            f"C nng build succeeded but binaries not found in {C_BUILD_DIR}"
+            f"C nng build succeeded but binaries not found in {C_BUILD_DIR}: {missing}"
         )
 
     print("  [c_nng] Build complete.")
-    return server_bin, client_bin
+    return bins
 
 
 def _wait_for_ready(proc: subprocess.Popen, timeout: float = 10.0) -> None:
@@ -82,62 +99,63 @@ def _wait_for_ready(proc: subprocess.Popen, timeout: float = 10.0) -> None:
     )
 
 
+def _run_binary(bin_path: Path, args: list[str], *, timeout: int = 120) -> dict:
+    """Run a self-contained benchmark binary and return parsed JSON stdout."""
+    result = subprocess.run(
+        [str(bin_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{bin_path.name} failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return json.loads(result.stdout)
+
+
+def _run_via_server(
+    transport_url: str, client_bin: Path, client_args: list[str], *, timeout: int = 120
+) -> dict:
+    """Start bench_server at transport_url, run client_bin, and return parsed JSON."""
+    server_bin = _ensure_built().server
+    server = subprocess.Popen(
+        [str(server_bin), transport_url],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_ready(server)
+        return _run_binary(client_bin, [transport_url, *client_args], timeout=timeout)
+    finally:
+        server.send_signal(signal.SIGTERM)
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+
+
 class CNngBenchmark(BaseBenchmark):
-    """Measures pure C nng (no Python overhead) by running bench_server and bench_client."""
+    """Measures pure C nng (no Python overhead) by running the bench_* binaries."""
 
     name = "c_nng"
 
-    def _run_pair(
-        self,
-        transport_url: str,
-        msg_size: int,
-        n_warmup: int,
-        n_iters: int,
-    ) -> dict:
-        """Start server, run client, return parsed JSON stats dict.
-
-        Raises NotImplementedError for inproc:// URLs because that transport
-        requires both endpoints to share the same process address space.
-        """
+    def _run_lat(self, transport_url: str, msg_size: int, n_warmup: int, n_iters: int) -> dict:
+        """Run a latency measurement and return the raw JSON dict."""
+        bins = _ensure_built()
+        args = [str(msg_size), str(n_warmup), str(n_iters)]
         if transport_url.startswith("inproc://"):
-            raise NotImplementedError(
-                "c_nng runs as separate processes — inproc:// is not supported"
-            )
-        server_bin, client_bin = _ensure_built()
+            return _run_binary(bins.inproc_lat, [transport_url, *args])
+        return _run_via_server(transport_url, bins.client_lat, args)
 
-        server = subprocess.Popen(
-            [str(server_bin), transport_url],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            _wait_for_ready(server)
-
-            result = subprocess.run(
-                [
-                    str(client_bin),
-                    transport_url,
-                    str(msg_size),
-                    str(n_warmup),
-                    str(n_iters),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"bench_client failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-                )
-
-            return json.loads(result.stdout)
-        finally:
-            server.send_signal(signal.SIGTERM)
-            try:
-                server.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                server.kill()
+    def _run_ops(self, transport_url: str, msg_size: int, n_warmup: int, duration_s: float) -> dict:
+        """Run an ops/sec measurement and return the raw JSON dict."""
+        bins = _ensure_built()
+        args = [str(msg_size), str(n_warmup), str(duration_s)]
+        if transport_url.startswith("inproc://"):
+            return _run_binary(bins.inproc_ops, [transport_url, *args])
+        return _run_via_server(transport_url, bins.client_ops, args)
 
     # ------------------------------------------------------------------
     # Latency
@@ -157,9 +175,7 @@ class CNngBenchmark(BaseBenchmark):
         we synthesise a representative sample array that exactly matches the
         reported statistics.  The runner stores the Stats object directly for C.
         """
-        d = self._run_pair(transport_url, msg_size, n_warmup, n_iters)
-        # Return a minimal list that encodes the stats for compute_stats to roundtrip.
-        # In practice the runner calls _run_pair_stats directly.
+        d = self._run_lat(transport_url, msg_size, n_warmup, n_iters)
         return [d["min_us"], d["p50_us"], d["p95_us"], d["p99_us"], d["max_us"]]
 
     def measure_latency_stats(
@@ -170,53 +186,7 @@ class CNngBenchmark(BaseBenchmark):
         n_iters: int,
     ) -> Stats:
         """Return Stats directly (more accurate than going via sample list)."""
-        d = self._run_pair(transport_url, msg_size, n_warmup, n_iters)
-        return compute_stats_from_c_json(d)
-
-    # ------------------------------------------------------------------
-    # Bandwidth
-    # ------------------------------------------------------------------
-
-    def measure_bandwidth(
-        self,
-        transport_url: str,
-        msg_size: int,
-        n_warmup: int,
-        n_iters: int,
-    ) -> list[float]:
-        d = self._run_pair(transport_url, msg_size, n_warmup, n_iters)
-        # Derive bandwidth from RTT stats: bw = 2 * msg_size / rtt_s  (MB/s)
-        def rtt_to_bw(rtt_us: float) -> float:
-            return 2 * msg_size / (rtt_us / 1e6) / 1e6 if rtt_us > 0 else 0.0
-
-        # Note: min_rtt → max_bw, max_rtt → min_bw
-        return [
-            rtt_to_bw(d["max_us"]),   # min bw (from max rtt)
-            rtt_to_bw(d["p99_us"]),
-            rtt_to_bw(d["p50_us"]),
-            rtt_to_bw(d["p95_us"]),   # note: non-monotonic mapping, keep raw
-            rtt_to_bw(d["min_us"]),   # max bw (from min rtt)
-        ]
-
-    def measure_bandwidth_stats(
-        self,
-        transport_url: str,
-        msg_size: int,
-        n_warmup: int,
-        n_iters: int,
-    ) -> Stats:
-        d = self._run_pair(transport_url, msg_size, n_warmup, n_iters)
-        mean_bw = 2 * msg_size / (d["mean_us"] / 1e6) / 1e6 if d["mean_us"] > 0 else 0.0
-        return Stats(
-            min=2 * msg_size / (d["max_us"] / 1e6) / 1e6,
-            p50=2 * msg_size / (d["p50_us"] / 1e6) / 1e6,
-            p95=2 * msg_size / (d["p95_us"] / 1e6) / 1e6,
-            p99=2 * msg_size / (d["p99_us"] / 1e6) / 1e6,
-            max=2 * msg_size / (d["min_us"] / 1e6) / 1e6 if d["min_us"] > 0 else 0.0,
-            mean=mean_bw,
-            std=0.0,
-            n=d.get("n", 0),
-        )
+        return compute_stats_from_c_json(self._run_lat(transport_url, msg_size, n_warmup, n_iters))
 
     # ------------------------------------------------------------------
     # Ops/sec
@@ -228,9 +198,8 @@ class CNngBenchmark(BaseBenchmark):
         msg_size: int,
         duration_s: float,
     ) -> float:
-        # Estimate n_iters from expected throughput with a generous safety factor.
-        n_iters = max(1000, int(duration_s * 100_000))
-        d = self._run_pair(transport_url, msg_size, 200, n_iters)
+        """Return achieved ops/sec over *duration_s* seconds."""
+        d = self._run_ops(transport_url, msg_size, 200, duration_s)
         return float(d.get("ops_per_sec", 0.0))
 
 

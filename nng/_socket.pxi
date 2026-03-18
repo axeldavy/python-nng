@@ -1,7 +1,8 @@
 # nng/_socket.pxi – included into _nng.pyx
 #
+# PipeStatus    – IntEnum for pipe lifecycle
+# Pipe          – non-owning wrapper for a pipe connection
 # Socket        – base class, owns nng_socket
-# Pipe          – thin (non-owning) wrapper returned by pipe callbacks
 # PairSocket    – pair0 / pair1
 # PubSocket     – pub0
 # SubSocket     – sub0
@@ -15,27 +16,46 @@
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from selectors import DefaultSelector as _DefaultSelector, EVENT_READ as _EVENT_READ
+import enum as _enum
 
-# ── Pipe event trampoline ─────────────────────────────────────────────────────
+# ── Pipe event trampoline (GIL-free) ─────────────────────────────────────────
 
 cdef void _pipe_trampoline(nng_pipe pipe,
                            nng_pipe_ev ev,
                            void *arg) noexcept nogil:
-    """Dispatch nng pipe events to registered Python callbacks (no GIL → GIL)."""
-    with gil:
-        callbacks = <object> arg
-        cb = callbacks.get(int(ev))
-        if cb is not None:
-            try:
-                cb(pipe.id, int(ev))
-            except Exception:
-                pass  # don't propagate exceptions back to nng's C stack
+    """Push pipe event into the GIL-free queue; send sentinel to wake dispatcher.
+
+    The socket id is captured here, while the pipe handle is still valid.
+    REM_POST events arrive after nng has already destroyed the pipe handle,
+    so calling nng_pipe_socket() at dispatch time would return an invalid id.
+    """
+    cdef uint32_t sock_id = nng_socket_id(nng_pipe_socket(pipe))
+    _pipe_event_queue.push(sock_id, pipe.id, <int>ev)
+    _dispatch_queue.push(0)   # sentinel – wakes dispatcher; id=0 is ignored
+
+
+# ── PipeStatus ────────────────────────────────────────────────────────────────
+
+class PipeStatus(_enum.IntEnum):
+    """Lifecycle state of a :class:`Pipe`.
+
+    * ``ADDING``  – the pipe has been created and negotiated (ADD_PRE event).
+      The :meth:`Socket.on_new_pipe` callback fires at this point.
+    * ``ACTIVE``  – the pipe is fully active (ADD_POST event).
+      The pipe's own ``on_status_change`` callback fires here.
+    * ``REMOVED`` – the pipe has been closed (REM_POST event).
+      The pipe's ``on_status_change`` callback fires, then the pipe is
+      removed from :attr:`Socket.pipes`.
+    """
+    ADDING  = NNG_PIPE_EV_ADD_PRE
+    ACTIVE  = NNG_PIPE_EV_ADD_POST
+    REMOVED = NNG_PIPE_EV_REM_POST
 
 
 # ── Pipe ──────────────────────────────────────────────────────────────────────
 
-class Pipe:
-    """A *pipe* represents a single physical connection on a socket.
+cdef class Pipe:
+    """Non-owning wrapper for a single nng pipe (physical connection).
 
     Pipes are created automatically:
 
@@ -44,43 +64,108 @@ class Pipe:
     * A :class:`Listener` creates one pipe for every inbound connection it
       accepts.
 
-    All pipes from all dialers and listeners on a socket are pooled together.
-    The protocol layer (REQ, PUB, PUSH, …) decides how to distribute messages
-    across that pool — broadcast, round-robin, load-balancing, etc.
-
     Applications normally never create ``Pipe`` objects directly.  They appear
-    as arguments to callbacks registered with :meth:`Socket.on_pipe_event`,
-    allowing the application to inspect or forcibly close individual
-    connections.  The ``Pipe`` object is **non-owning** — closing it simply
-    kicks the connection; the underlying socket is unaffected.
+    as arguments to callbacks registered with :meth:`Socket.on_new_pipe`.
+    The ``Pipe`` object is **non-owning** — closing it kicks the connection;
+    the underlying socket is unaffected.
     """
 
-    __slots__ = ("_id",)
+    cdef PipeHandle _handle
 
-    def __init__(self, uint32_t pipe_id):
-        self._id = pipe_id
+    cdef object __weakref__
+
+    @staticmethod
+    cdef Pipe _from_nng(nng_pipe p):
+        cdef Pipe obj = Pipe.__new__(Pipe)
+        obj._handle = PipeHandle(p)
+        return obj
 
     @property
     def id(self) -> int:
-        return self._id
+        """Numeric pipe ID."""
+        return self._handle.get_id()
+
+    def __index__(self): return self._handle.get_id()
+    def __hash__(self):  return self._handle.get_id()
+    def __eq__(self, other):
+        if not isinstance(other, Pipe):
+            return NotImplemented
+        return self._handle == (<Pipe>other)._handle
+    def __ne__(self, other):
+        if not isinstance(other, Pipe):
+            return NotImplemented
+        return self._handle != (<Pipe>other)._handle
+
+    @property
+    def status(self) -> PipeStatus:
+        """Current :class:`PipeStatus` of this pipe."""
+        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+        if sock is None:
+            return PipeStatus.REMOVED
+        return (<Socket>sock).get_pipe_status(self._handle.get_id())
+
+    @property
+    def on_status_change(self):
+        """Callback fired when this pipe transitions to ACTIVE or REMOVED."""
+        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+        if sock is None:
+            return None
+        return (<Socket>sock).get_pipe_cb(self._handle.get_id())
+
+    @on_status_change.setter
+    def on_status_change(self, cb):
+        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+        if sock is not None:
+            (<Socket>sock).set_pipe_cb(self._handle.get_id(), cb)
+
+    @property
+    def socket(self):
+        """The owning :class:`Socket`, or ``None`` if no longer tracked."""
+        return _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+
+    @property
+    def dialer(self):
+        """The :class:`Dialer` that created this pipe, or ``None``."""
+        cdef nng_dialer d = self._handle.get_dialer()
+        if d.id == 0:
+            return None
+        # Locate within the owning socket's dialer list
+        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+        if sock is None:
+            return None
+        for dl in (<Socket>sock)._dialers:
+            if (<Dialer>dl)._handle.id() == d.id:
+                return dl
+        return None
+
+    @property
+    def listener(self):
+        """The :class:`Listener` that accepted this pipe, or ``None``."""
+        cdef nng_listener li = self._handle.get_listener()
+        if li.id == 0:
+            return None
+        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+        if sock is None:
+            return None
+        for ln in (<Socket>sock)._listeners:
+            if (<Listener>ln)._handle.id() == li.id:
+                return ln
+        return None
 
     def close(self) -> None:
         """Forcibly close this connection.
 
-        This immediately terminates the underlying transport connection.  For
-        a dialer-owned pipe, the dialer will attempt to reconnect afterwards.
-        For a listener-owned pipe, the remote peer will need to reconnect.
-        Any in-flight sends or receives on this pipe fail immediately.
+        The underlying transport is terminated immediately.  Dialers attempt to
+        reconnect; listeners wait for a new inbound connection.  In-flight
+        sends/receives on this pipe fail immediately.
         """
-        cdef nng_pipe p
-        p.id = self._id
-        nng_pipe_close(p)   # ignore error (pipe may already be gone)
+        check_err(self._handle.close())
 
     def __repr__(self) -> str:
-        return f"Pipe(id={self._id})"
+        return f"Pipe(id={self._handle.get_id()}, status={self.status.name})"
 
 
-# ── Pipe-event constants (re-exported at module level) ────────────────────────
+# ── Pipe-event constants (re-exported at module level for backward compat) ────
 PIPE_EV_ADD_PRE  = NNG_PIPE_EV_ADD_PRE
 PIPE_EV_ADD_POST = NNG_PIPE_EV_ADD_POST
 PIPE_EV_REM_POST = NNG_PIPE_EV_REM_POST
@@ -116,10 +201,66 @@ cdef class Socket:
     * :class:`PushSocket` — round-robin / load-balance across pipes.
     * :class:`ReqSocket` — send to *one* available pipe; reply must arrive on
       the same pipe.  Uses the first ready pipe, not strict round-robin.
-    * :class:`PairSocket` — one active pipe at a time (or multiple in
-      polyamorous mode).
+    * :class:`PairSocket` — one active pipe at a time
     * :class:`BusSocket` — send to *all other* peers.
     * :class:`SurveyorSocket` — broadcast survey; collect all responses.
+
+    ** Thread-safety and concurrency **
+    All socket methods are thread-safe and can be called concurrently from
+    multiple threads.
+    `submit_send`, `submit_recv`, `asend`, and `arecv` internally submit an
+    asynchronous operation to the socket's I/O thread and return a Future,
+    avoiding to block until completion. They can be called concurrently
+    with each other and with `recv`/`send`, as well as from different
+    threads or asyncio loops.
+
+    **Available transports**
+
+    The URL scheme passed to :meth:`add_dialer` / :meth:`add_listener` selects
+    the transport:
+
+    * **TCP** – ``tcp://<host>:<port>``
+
+      Cross-machine communication over TCP/IP.  Use ``tcp4://`` or ``tcp6://``
+      to force IPv4 or IPv6.  When listening, omit the host or use ``0.0.0.0``
+      / ``::`` to accept on all interfaces, e.g. ``tcp://0.0.0.0:5555`` or
+      simply ``tcp://:5555``.  IPv6 literals must be bracketed:
+      ``tcp://[::1]:5555``.
+
+    * **IPC** – ``ipc://<path>``
+
+      Inter-process communication on the same host.  Uses UNIX domain sockets
+      on POSIX and named pipes on Windows.  On POSIX, prefer absolute paths to
+      avoid working-directory sensitivity.  ``unix://`` is an alias for
+      ``ipc://`` on POSIX systems.
+
+    * **Abstract** (Linux only) – ``abstract://<name>``
+
+      Linux abstract-namespace sockets.  Names are URI-encoded and do not
+      appear in the filesystem; they are freed automatically when no longer in
+      use.  Embedded NUL bytes can be encoded as ``%00``, e.g.
+      ``abstract://foo%00bar``.
+
+    * **In-process** – ``inproc://<name>``
+
+      Zero-copy communication between sockets **within the same process**.
+      The name is an arbitrary string; different names are completely
+      independent. Sockets in separate processes, or using different NNG
+      library instances, cannot communicate via inproc.
+
+    * **UDP** *(experimental)* – ``udp://<host>:<port>``
+
+      Unreliable, connectionless transport.  Messages are ordered by nng but
+      gaps are possible; there is no delivery guarantee.  Maximum message size
+      is effectively ~1140 bytes on standard Ethernet (65 000 B hard cap).
+      Use ``udp4://`` or ``udp6://`` to restrict to a specific IP version.
+      IPv6 literals must be bracketed: ``udp://[::1]:5555``.
+
+    **Closing**
+
+    Closing a socket (via :meth:`close` or exiting a ``with`` block) waits for
+    outstanding operations to finish or be aborted.  All associated dialers,
+    listeners, pipes, and contexts are invalidated.
 
     **Typical usage**::
 
@@ -130,37 +271,163 @@ cdef class Socket:
     """
 
     cdef shared_ptr[SocketHandle] _handle
-    # Dict mapping int(nng_pipe_ev) → Python callable; kept alive as long as
-    # the socket is open so the trampoline arg pointer stays valid.
-    cdef object _pipe_cbs
     # Strong references to all dialers/listeners created on this socket so
     # they are not garbage-collected while the socket is open.
     cdef list _dialers
     cdef list _listeners
 
+    # ── Pipe tracking (guarded by _pipe_mutex) ────────────────────────────
+    cdef DCGMutex _pipe_mutex
+    cdef list     _pipes            # ordered list of live Pipe objects
+    cdef dict     _pipe_statuses    # int(pipe_id) → PipeStatus
+    cdef dict     _pipe_cbs_table   # int(pipe_id) → callable | None
+    cdef object   _on_new_pipe_cb   # callable(Pipe) | None (ADD_PRE)
+
     # For polling. Lazy init.
     cdef int _fd_recv
     cdef int _fd_send
 
+    cdef object __weakref__
+
     def __cinit__(self):
         check_nng_init()
         # _handle default-constructed (empty) by Cython's C++ member glue.
-        self._pipe_cbs = {}
         self._dialers = []
         self._listeners = []
+        self._pipes = []
+        self._pipe_statuses = {}
+        self._pipe_cbs_table = {}
+        self._on_new_pipe_cb = None
         self._fd_recv = -1
         self._fd_send = -1
 
+    cdef void _setup_pipe_tracking(self) except *:
+        """Register the GIL-free trampoline and add socket to the registry.
+
+        Must be called from each concrete subclass __cinit__ immediately after
+        self._handle is assigned (i.e. after nng_xxx_open succeeds).
+        """
+        cdef nng_socket raw = self._handle.get().raw()
+        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_PRE,  _pipe_trampoline, NULL))
+        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_POST, _pipe_trampoline, NULL))
+        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_REM_POST, _pipe_trampoline, NULL))
+        _socket_registry[nng_socket_id(raw)] = self
+
     # __dealloc__ intentionally omitted: shared_ptr[SocketHandle] destructor
     # calls SocketHandle::~SocketHandle() -> nng_socket_close() when ref-count hits 0.
+
+    # ── Pipe management cdef methods ──────────────────────────────────────────
+
+    cdef void add_pipe(self, nng_pipe p):
+        """Create a Pipe for *p*, record ADDING status, fire on_new_pipe callback.
+
+        Called by the dispatch thread at ADD_PRE.  The _on_new_pipe_cb is
+        copied out under the mutex then called without the mutex held to prevent
+        deadlock if the callback re-enters socket methods.
+        """
+        cdef Pipe pipe = Pipe._from_nng(p)
+        cdef int pid = pipe.id
+        cdef object cb
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        self._pipes.append(pipe)
+        self._pipe_statuses[pid] = PipeStatus.ADDING
+        cb = self._on_new_pipe_cb
+        lock.unlock()
+        if cb is not None:
+            try:
+                cb(pipe)
+            except BaseException:
+                _print_exc()
+
+    cdef void promote_pipe(self, uint32_t pid):
+        """Transition pipe *pid* from ADDING → ACTIVE and fire its callback."""
+        cdef object cb
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        self._pipe_statuses[<int>pid] = PipeStatus.ACTIVE
+        cb = self._pipe_cbs_table.get(<int>pid)
+        lock.unlock()
+        if cb is not None:
+            try:
+                cb()
+            except BaseException:
+                _print_exc()
+
+    cdef void remove_pipe(self, uint32_t pid):
+        """Set pipe *pid* to REMOVED, fire callback, then remove from tables.
+
+        The callback fires while the pipe still appears in *_pipes* (with
+        REMOVED status) so the callback can inspect *socket.pipes*.
+        After the callback returns the pipe is removed from all tracking tables.
+        """
+        cdef object cb
+        cdef int i
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        self._pipe_statuses[<int>pid] = PipeStatus.REMOVED
+        cb = self._pipe_cbs_table.get(<int>pid)
+        lock.unlock()
+        if cb is not None:
+            try:
+                cb()
+            except BaseException:
+                _print_exc()
+        # Remove from tracking tables after callback has returned.
+        lock_gil_friendly(lock, self._pipe_mutex)
+        for i in range(len(self._pipes)):
+            if (<Pipe>self._pipes[i])._handle.get_id() == <int>pid:
+                del self._pipes[i]
+                break
+        self._pipe_statuses.pop(<int>pid, None)
+        self._pipe_cbs_table.pop(<int>pid, None)
+
+    cdef object get_pipe_status(self, int pid):
+        """Return the current :class:`PipeStatus` for *pid* (REMOVED if unknown)."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        return self._pipe_statuses.get(pid, PipeStatus.REMOVED)
+
+    cdef void set_pipe_cb(self, int pid, object cb):
+        """Register or clear the on_status_change callback for *pid*."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        if cb is None:
+            self._pipe_cbs_table.pop(pid, None)
+        else:
+            self._pipe_cbs_table[pid] = cb
+
+    cdef object get_pipe_cb(self, int pid):
+        """Return the on_status_change callback for *pid*, or ``None``."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        return self._pipe_cbs_table.get(pid)
 
     cdef inline void _check(self) except *:
         if not self._handle or not self._handle.get().is_open():
             raise NngClosed(NNG_ECLOSED, "Socket is closed")
 
     def close(self) -> None:
-        """Close the socket and release all resources."""
+        """Close the socket and release all resources.
+
+        Waits for any outstanding operations to complete or be aborted before
+        returning.  All associated :class:`Dialer`, :class:`Listener`,
+        :class:`Pipe`, and :class:`Context` objects are invalidated.
+
+        .. note::
+            This method blocks until in-flight operations finish.  Do not call
+            it from a context that cannot block.  Closing the socket may
+            disrupt transfers that are still in progress.
+        """
+        cdef unique_lock[DCGMutex] lock
         if self._handle and self._handle.get().is_open():
+            # Clear pipe tracking before closing so callbacks cannot fire after close.
+            lock_gil_friendly(lock, self._pipe_mutex)
+            self._on_new_pipe_cb = None
+            self._pipes.clear()
+            self._pipe_statuses.clear()
+            self._pipe_cbs_table.clear()
+            lock.unlock()
             with nogil:
                 self._handle.get().close()
 
@@ -344,6 +611,17 @@ cdef class Socket:
         send_timeout:
             Send timeout in ms for the pipe created by this dialer
             (overrides the socket-level value).
+
+        Raises
+        ------
+        NngClosed
+            If the socket has been closed.
+        NngNotSupported
+            If *url* uses a transport scheme that is not recognized by nng
+            (e.g. ``"unknown://host:1234"``).  Note: nng raises NngNotSupported
+            rather than NngInvalidArgument for unrecognized transport names.
+        NngInvalidArgument
+            If *url* is otherwise syntactically invalid for a known transport.
         """
         self._check()
         cdef bytes b = _encode_url(url)
@@ -403,6 +681,19 @@ cdef class Socket:
         send_timeout:
             Send timeout in ms for pipes accepted by this listener
             (overrides the socket-level value).
+
+        Raises
+        ------
+        NngClosed
+            If the socket has been closed.
+        NngNotSupported
+            If *url* uses a transport scheme that is not recognized by nng
+            (e.g. ``"unknown://host:1234"``).  Note: nng raises NngNotSupported
+            rather than NngInvalidArgument for unrecognized transport names.
+        NngInvalidArgument
+            If *url* is otherwise syntactically invalid for a known transport.
+        NngAddressInUse
+            If the address is already bound by another listener.
         """
         self._check()
         cdef bytes b = _encode_url(url)
@@ -423,63 +714,6 @@ cdef class Socket:
     # ── Synchronous send / recv ───────────────────────────────────────────
 
     def send(self, data, *, bint nonblock=False) -> None:
-        """Send raw bytes, releasing the GIL while waiting.
-
-        Parameters
-        ----------
-        data:
-            Bytes, bytearray, or any buffer-protocol object.
-        nonblock:
-            If *True* raise :exc:`NngAgain` instead of blocking.
-        """
-        self._check()
-
-        # Convert data to bytes
-        cdef bytes data_as_bytes = data if not isinstance(data, bytes) else <bytes> data
-
-        # Create a memory view of the data
-        cdef const unsigned char[::1] mv = data_as_bytes
-
-        # Send the message (NOTE: this internally uses nng_sendmsg, copying to a fresh message)
-        cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
-        cdef int rv
-        with nogil:
-            rv = nng_send(self._handle.get().raw(), &mv[0], len(mv), flags)
-
-        # Raise on errors
-        check_err(rv)
-
-    def recv(self, *, bint nonblock=False) -> bytes:
-        """Receive the next message body as *bytes*, releasing the GIL.
-
-        Parameters
-        ----------
-        nonblock:
-            If *True* raise :exc:`NngAgain` if no message is ready.
-        """
-        self._check()
-
-        # Receive the message
-        cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
-        cdef nng_msg *msg = NULL
-        cdef int rv
-        with nogil:
-            rv = nng_recvmsg(self._handle.get().raw(), &msg, flags)
-
-        # Raise on errors
-        check_err(rv)
-
-        # Convert result to bytes
-        cdef size_t n = nng_msg_len(msg)
-        cdef bytes result = PyBytes_FromStringAndSize(<char *> nng_msg_body(msg), n)
-
-        # Free message
-        nng_msg_free(msg)
-
-        # Return result
-        return result
-
-    def send_msg(self, Message msg, *, bint nonblock=False) -> None:
         """Send an :class:`Message`.  Transfers ownership on success.
         
         Parameters
@@ -488,30 +722,49 @@ cdef class Socket:
             The :class:`Message` to send.
         nonblock:
             If *True* raise :exc:`NngAgain` instead of blocking.
+
+        NOTE: Signals such as KeyBoardInterrupt (Ctrl-C) are not handled
+        during this function. Thus avoid blocking calls on the main thread.
+        Use submit_send().result() for a blocking call that handles Ctrl-C.
         """
         self._check()
 
-        # Retrieve message pointer
-        cdef nng_msg *ptr = msg._steal_ptr()
+        # Build the nng message
+        cdef bint message_is_copy = False
+        cdef nng_msg *ptr = NULL
+        if not isinstance(data, Message):
+            check_err(nng_msg_from_data(data, &ptr))
+            message_is_copy = True
+        else:
+            ptr = (<Message>data)._steal_ptr()
 
-        # Send message blocking
+        # Send message
         cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
         cdef int rv
         with nogil:
             rv = nng_sendmsg(self._handle.get().raw(), ptr, flags)
 
-        # Raise on errors and restore message ownership
+        # Raise on errors and restore/free message
         if rv != 0:
-            msg._handle.restore(ptr)
+            if message_is_copy:
+                # nng did not take ownership; free the internally created copy.
+                nng_msg_free(ptr)
+            else:
+                # nng did not take ownership; restore it to the Python wrapper.
+                (<Message>data)._handle.restore(ptr)
             check_err(rv)
 
-    def recv_msg(self, *, bint nonblock=False) -> Message:
+    def recv(self, *, bint nonblock=False) -> Message:
         """Receive and return an :class:`Message` (zero-copy via buffer protocol).
         
         Parameters
         ----------
         nonblock:
             If *True* raise :exc:`NngAgain` if no message is ready.
+
+        NOTE: Signals such as KeyBoardInterrupt (Ctrl-C) are not handled
+        during this function. Thus avoid blocking calls on the main thread.
+        Use submit_recv().result() for a blocking call that handles Ctrl-C.
         """
         self._check()
 
@@ -531,11 +784,12 @@ cdef class Socket:
     # ── Async send / recv ─────────────────────────────────────────────────
 
     async def asend(self, data) -> None:
-        """Send bytes asynchronously (asyncio-compatible)."""
+        """Send bytes asynchronously (asyncio-compatible).
+        
+        NOTE: if the coroutine is cancelled while waiting for send
+        completion, the data may or may not have been sent.
+        """
         self._check()
-
-        # Build the nng message
-        msg = Message(data)
 
         # Fast path disabled
         # -> when EAGAIN is returned in REQ mode,
@@ -570,9 +824,18 @@ cdef class Socket:
         msg = Message._from_ptr(ptr)
         """
 
+        # Create an aio request
         cdef _AioOp op = _AioOp.create_for_socket(self._handle)
-        op.set_payload(msg)
-        op.set_msg(msg._steal_ptr())
+
+        # Build the nng message
+        cdef nng_msg *ptr = NULL
+        if not isinstance(data, Message):
+            check_err(nng_msg_from_data(data, &ptr))
+        else:
+            ptr = (<Message>data)._steal_ptr()
+
+        # Transfer message ownership
+        op.set_msg(ptr)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
@@ -590,8 +853,8 @@ cdef class Socket:
             op.ensure_finish()
             
 
-    async def arecv(self) -> bytes:
-        """Receive bytes asynchronously."""
+    async def arecv(self):
+        """Receive bytes asynchronously (asyncio-compatible)."""
         cdef size_t result_len
         cdef bytes result
 
@@ -604,12 +867,9 @@ cdef class Socket:
         with nogil:
             rv = nng_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
 
-        # On success the message is received and we can convert it to bytes and return.
+        # On success the message is received and we can return it.
         if rv == NNG_OK:
-            result_len = nng_msg_len(msg)
-            result = PyBytes_FromStringAndSize(<char *> nng_msg_body(msg), result_len)
-            nng_msg_free(msg)
-            return result
+            return Message._from_ptr(msg)
 
         # On EAGAIN the message was not received but we can still proceed to the slow path.
         # On any other error the message was not received and we must raise immediately.
@@ -618,98 +878,11 @@ cdef class Socket:
 
         # Slow path: recv queue was empty; use the async aio machinery.
         cdef _AioOp op = _AioOp.create_for_socket(self._handle)
-        future = op.get_future()
-
-        # Submit the operation
-        op.submit_socket_recv(self._handle.get().raw())
-
-        # Await completion
-        try:
-            await future
-        except _asyncio.CancelledError:
-            op.on_future_cancel()
-            raise
-        finally:
-            op.ensure_finish()
-
-        # Retrieve the message from the completed operation
-        cdef nng_msg *ptr = op.get_msg()
-        if ptr == NULL:
-            raise NngError(NNG_EINTERNAL, "No message in AIO after async recv")
-
-        # Extract the message body as bytes and free the message
-        result_len = nng_msg_len(ptr)
-        result = PyBytes_FromStringAndSize(<char *> nng_msg_body(ptr), result_len)
-        nng_msg_free(ptr)
-        return result
-
-    async def asend_msg(self, Message msg) -> None:
-        """Send a Message asynchronously."""
-        self._check()
-
-        # See asend() for the rationale behind the disabled fast path.
-        """
-        cdef nng_msg *ptr = msg._steal_ptr()
-
-        # Fast path: non-blocking send — no task-pool dispatch.
-        cdef int rv
-        with nogil:
-            rv = nng_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK)
-
-        # On success the message is sent and we are done.
-        if rv == NNG_OK:
-            return
-
-        # On EAGAIN the message was not sent but we still own it; we can proceed to the slow path.
-        # On any other error the message was not sent; restore ownership to the caller's Message
-        # object before raising.
-        if rv != NNG_EAGAIN:
-            msg._ptr   = ptr
-            msg._owned = True
-            check_err(rv)
-
-        # Slow path: re-wrap the ptr (nng did not take it on EAGAIN).
-        msg = Message._from_ptr(ptr)
-        """
-
-        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
-        op.set_payload(msg)
-        op.set_msg(msg._steal_ptr())
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_send(self._handle.get().raw())
-
-        # Await completion
-        try:
-            await future
-        except _asyncio.CancelledError:
-            op.on_future_cancel()
-            raise
-        finally:
-            op.ensure_finish()
-
-    async def arecv_msg(self):
-        """Receive a Message asynchronously."""
-        self._check()
-
-        # Fast path: non-blocking recv — no task-pool dispatch.
-        cdef nng_msg *msg = NULL
-        cdef int rv
-        with nogil:
-            rv = nng_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
-        if rv == NNG_OK:
-            return Message._from_ptr(msg)
-        if rv != NNG_EAGAIN:
-            check_err(rv)
-
-        # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
-        future = op.get_future()
-
-        # Submit the operation
         op.submit_socket_recv(self._handle.get().raw())
 
         # Await completion
@@ -725,7 +898,61 @@ cdef class Socket:
         cdef nng_msg *ptr = op.get_msg()
         if ptr == NULL:
             raise NngError(NNG_EINTERNAL, "No message in AIO after async recv")
+
+        # Take ownership of the message and return it
         return Message._from_ptr(ptr)
+
+    # ── concurrent.futures submit helpers ─────────────────────────────────
+
+    def submit_send(self, data) -> _concurrent_futures.Future:
+        """Send *data* (bytes-like) asynchronously; return a concurrent.futures.Future.
+
+        The future resolves to ``None`` on success or raises an :exc:`NngError`
+        on failure. Can be called from any thread.
+        """
+        self._check()
+
+        # Create an aio request
+        cdef _AioOp op = _AioOp.create_for_socket_concurrent(self._handle, False)
+
+        # Build the nng message
+        cdef nng_msg *ptr = NULL
+        if not isinstance(data, Message):
+            check_err(nng_msg_from_data(data, &ptr))
+        else:
+            ptr = (<Message>data)._steal_ptr()
+
+        # Transfer message ownership
+        op.set_msg(ptr)
+
+        # Fetch the future now as get_future is invalid after submission
+        fut = op.get_future()
+
+        # Submit the operation
+        op.submit_socket_send(self._handle.get().raw())
+
+        # Return the concurrent.futures.Future to the caller
+        return fut
+
+    def submit_recv(self) -> _concurrent_futures.Future:
+        """Receive asynchronously; return a concurrent.futures.Future → bytes.
+
+        The future resolves to the received payload as ``bytes``.
+        Can be called from any thread.
+        """
+        self._check()
+
+        # Create an aio request
+        cdef _AioOp op = _AioOp.create_for_socket_concurrent(self._handle, True)
+
+        # Fetch the future now as get_future is invalid after submission
+        fut = op.get_future()
+
+        # Submit the operation
+        op.submit_socket_recv(self._handle.get().raw())
+
+        # Return the concurrent.futures.Future to the caller
+        return fut
 
     # ── Poll-fd readiness helpers ─────────────────────────────────────────
 
@@ -861,45 +1088,40 @@ cdef class Socket:
         finally:
             loop.remove_reader(fd)
 
-    # ── Pipe callbacks ────────────────────────────────────────────────────
+    # ── Pipe access ───────────────────────────────────────────────────────────
 
-    def on_pipe_event(self, int event, object callback) -> None:
-        """Register *callback* to be called when a pipe-lifecycle event fires.
+    @property
+    def pipes(self) -> list:
+        """Snapshot list of currently live :class:`Pipe` objects.
 
-        This is the primary way to observe connections being established or
-        dropped on a socket.  Only one callback per event type is kept; calling
-        this method again for the same *event* replaces the previous callback.
+        The list is a copy; it will not change as connections are added or
+        removed.  Inspect :attr:`Pipe.status` for the state of each pipe.
+        """
+        self._check()
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        return list(self._pipes)
+
+    def on_new_pipe(self, callback) -> None:
+        """Register a callback invoked when a new connection is negotiated.
+
+        The callback is called at :attr:`PipeStatus.ADDING` – before the pipe
+        is admitted to the socket pool.  Calling :meth:`Pipe.close` inside
+        the callback rejects the connection entirely.
+
+        Only one callback is kept; calling this method again replaces the
+        previous one.  Pass ``None`` to disable.
 
         Parameters
         ----------
-        event:
-            One of:
-
-            * :data:`PIPE_EV_ADD_PRE` — called just *before* a new pipe is
-              added to the socket.  You may call ``Pipe(pipe_id).close()``
-              here to reject the connection.
-            * :data:`PIPE_EV_ADD_POST` — called just *after* a new pipe is
-              added and ready to carry messages.
-            * :data:`PIPE_EV_REM_POST` — called just *after* a pipe has been
-              removed (connection closed or lost).
         callback:
-            Callable ``(pipe_id: int, event: int) -> None``.
-
-            .. warning::
-               This is called from nng's **internal I/O thread**, not from
-               your application thread.  Keep it short, non-blocking, and
-               thread-safe.  Do not call blocking nng operations (send/recv)
-               from within the callback.
+            ``(pipe: Pipe) -> None``.  Executed on the dispatcher thread;
+            keep it short and non-blocking.
         """
         self._check()
-        self._pipe_cbs[event] = callback
-        # _pipe_cbs dict is kept alive by self; its address is stable as long
-        # as we hold the reference.
-        check_err(nng_pipe_notify(
-            self._handle.get().raw(),
-            <nng_pipe_ev> event,
-            _pipe_trampoline,
-            <void *> self._pipe_cbs))
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        self._on_new_pipe_cb = callback
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(id={self._handle.get().raw().id if self._handle else 0})"
@@ -915,6 +1137,9 @@ cdef inline bytes _encode_url(url):
 
 # ── Protocol subclasses ───────────────────────────────────────────────────────
 
+# We do not support raw sockets as it involves header editing and many potential
+# pitfalls, at which point it is better that advanced users use the C API directly.
+
 cdef class PairSocket(Socket):
     """Bidirectional, point-to-point socket (Pair protocol).
 
@@ -922,46 +1147,34 @@ cdef class PairSocket(Socket):
     mode it is strictly **one-to-one**: only a single pipe is active at a time.
     Messages sent while no pipe is connected are held in the send buffer.
 
-    **Polyamorous mode** (``poly=True``) relaxes this: many pipes may be
-    active simultaneously.  Outbound messages must carry a pipe ID in their
-    header (set via :meth:`Message.set_pipe`) to address a specific peer;
-    inbound messages carry the pipe ID of the sender.
+    .. note::
+       PAIR does **not** guarantee reliable delivery.  Although back-pressure
+       prevents most discards, some topologies can still lose messages.
+       Applications that need reliable delivery should use :class:`ReqSocket`
+       or add their own acknowledgment layer.
+
+    **Protocol versions**
+
+    The default is Pair v1.  Pass ``v0=True`` for the legacy v0 protocol, which
+    lacks hop-count headers and is required when interoperating with older
+    implementations such as *libnanomsg* or *mangos*.
 
     Parameters
     ----------
     v0:
         Use the older Pair v0 protocol instead of the default v1.
-    poly:
-        Enable polyamorous mode (Pair v1 only).
-    raw:
-        Open in raw mode (advanced; bypasses the normal protocol state machine).
     """
 
-    def __cinit__(self, *, bint v0=False, bint poly=False, bint raw=False):
+    def __cinit__(self, *, bint v0=False):
         cdef nng_socket raw_sock
         if v0:
-            check_err(nng_pair0_open_raw(&raw_sock) if raw
-                      else nng_pair0_open(&raw_sock))
-        elif poly:
-            check_err(nng_pair1_open_poly(&raw_sock))
+            check_err(nng_pair0_open(&raw_sock))
         else:
-            check_err(nng_pair1_open_raw(&raw_sock) if raw
-                      else nng_pair1_open(&raw_sock))
+            check_err(nng_pair1_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
-    @property
-    def polyamorous(self) -> bool:
-        """True if the socket is in polyamorous (fan-out) mode."""
-        self._check()
-        cdef cpp_bool v
-        check_err(nng_socket_get_bool(self._handle.get().raw(), b"pair1:polyamorous", &v))
-        return bool(v)
-
-    @polyamorous.setter
-    def polyamorous(self, bint v):
-        self._check()
-        check_err(nng_socket_set_bool(self._handle.get().raw(), b"pair1:polyamorous", v))
-
+# TODO: v1 has NNG_OPT_MAXTTL
 
 cdef class PubSocket(Socket):
     """Publish socket — broadcasts every message to **all** connected subscribers.
@@ -971,18 +1184,20 @@ cdef class PubSocket(Socket):
     subscription silently discard the message.
 
     * **Fan-out**: one send → copied to all active pipes.
-    * **Topic filtering**: filtering happens on the *subscriber* side based on
-      the message body prefix (see :meth:`SubSocket.subscribe`).
+    * **Topic filtering**: filtering happens on the *subscriber* side based on the
+      message body prefix (see :meth:`SubSocket.subscribe`).  The publisher
+      always sends every message to every subscriber; subscriptions do **not**
+      reduce network bandwidth.
     * **No back-pressure**: a slow subscriber does not block the publisher;
       messages for that subscriber are dropped when its send buffer is full.
-    * PubSocket cannot receive; it is send-only.
+    * PubSocket cannot receive; :meth:`recv` raises ``NngNotSupported``.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_pub0_open_raw(&raw_sock) if raw
-                  else nng_pub0_open(&raw_sock))
+        check_err(nng_pub0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
 
 cdef class SubSocket(Socket):
@@ -993,11 +1208,16 @@ cdef class SubSocket(Socket):
     The socket can hold multiple subscriptions simultaneously.
 
     Messages whose body does *not* start with at least one registered prefix
-    are silently dropped by nng before they reach the application.
+    are silently dropped by nng before they reach the application.  Topic
+    filtering is done **locally** on the subscriber side — the publisher always
+    sends every message to every subscriber, so subscriptions do not reduce
+    bandwidth consumption.
 
-    * SubSocket is receive-only; :meth:`send` is not available.
+    * SubSocket is receive-only; :meth:`send` raises ``NngNotSupported``.
     * One ``SubSocket`` can connect to multiple publishers by calling
-      :meth:`dial` several times.
+      :meth:`add_dialer` several times.
+    * When the receive queue is full, **newer** messages are kept and older
+      unread messages are discarded by default.
 
     Example::
 
@@ -1008,11 +1228,11 @@ cdef class SubSocket(Socket):
         msg = sub.recv()
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_sub0_open_raw(&raw_sock) if raw
-                  else nng_sub0_open(&raw_sock))
+        check_err(nng_sub0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
     def subscribe(self, prefix: bytes = b"") -> None:
         """Subscribe to messages whose body starts with *prefix*.
@@ -1031,6 +1251,30 @@ cdef class SubSocket(Socket):
         check_err(nng_sub0_socket_unsubscribe(
             self._handle.get().raw(), &mv[0] if len(mv) else NULL, len(mv)))
 
+    @property
+    def skip_older_on_full_queue(self) -> bool:
+        """Whether to drop older messages when the receive queue is full.
+
+        By default, when the receive queue is full, newer messages are kept and
+        older unread messages are dropped.  Setting this option to ``False``
+        reverses that behavior: older messages are kept and newer messages are
+        dropped instead.
+        """
+        self._check()
+        cdef int v
+        check_err(nng_socket_get_bool(self._handle.get().raw(), b"sub:prefnew", &v))
+        return v != 0
+
+    @skip_older_on_full_queue.setter
+    def skip_older_on_full_queue(self, bool skip_older):
+        self._check()
+        check_err(nng_socket_set_bool(self._handle.get().raw(), b"sub:prefnew", skip_older))
+
+    def open_context(self) -> SubContext:
+        """Open an independent sub context on this socket."""
+        self._check()
+        return SubContext.open(self)
+
 
 cdef class ReqSocket(Socket):
     """Request socket — sends a request and waits for exactly one reply.
@@ -1041,13 +1285,19 @@ cdef class ReqSocket(Socket):
 
     **Message routing with multiple peers**
 
-    When the socket has several pipes (e.g. after multiple :meth:`dial` calls
-    or when connected to a server with multiple workers via contexts), each
-    request is sent to the **first available** pipe — whichever peer is ready
-    to accept it.  The reply is expected to arrive on the *same* pipe.
+    When the socket has several pipes (e.g. after multiple :meth:`add_dialer`
+    calls or when connected to a server with multiple workers via contexts),
+    each request is sent to the **first available** pipe — whichever peer is
+    ready to accept it.  The reply is expected to arrive on the *same* pipe.
 
-    If the pipe dies before the reply arrives, the request can be automatically
-    resent on another pipe after :attr:`resend_time` milliseconds.
+    If the pipe dies before the reply arrives, the request is automatically
+    resent on another available pipe (see :attr:`resend_time`).  Because
+    requests may be retransmitted, they should be **idempotent** — executing
+    the same request twice must produce the same result.  If that is not
+    possible, set :attr:`resend_time` to ``-1`` to disable automatic resending.
+
+    Cancelling a pending request is done by sending a new request; any reply
+    from the cancelled request that arrives later is silently discarded.
 
     **Concurrent requests**
 
@@ -1057,21 +1307,27 @@ cdef class ReqSocket(Socket):
     be in-flight on a different pipe simultaneously.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_req0_open_raw(&raw_sock) if raw
-                  else nng_req0_open(&raw_sock))
+        check_err(nng_req0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
     @property
     def resend_time(self) -> int:
         """How long (ms) to wait for a reply before resending the request.
 
-        If a reply does not arrive within this interval the request is
-        retransmitted — potentially on a *different* pipe if the original peer
-        has become unavailable.  ``-1`` (the default) disables automatic
-        resending.  Setting a value here provides automatic fault-tolerance
-        when working with multiple REP peers.
+        Requests are automatically resent if the peer disconnects.
+
+        resend_time adds a timer at which requests will be resent (even if no
+        disconnection has been detected) to the peer until a reply is received.
+    
+        ``-1`` (the default) disables automatic resending (exception on disconnect)
+        Setting a positive value provides automatic fault-tolerance when working with
+        multiple REP peers, or possible packet loss.
+
+        Setting a < 1000ms resend_time requires tuning :attr:`resend_tick` to
+        have real effect.
         """
         self._check()
         cdef nng_duration v
@@ -1082,6 +1338,25 @@ cdef class ReqSocket(Socket):
     def resend_time(self, int ms):
         self._check()
         check_err(nng_socket_set_ms(self._handle.get().raw(), b"req:resend-time", ms))
+
+    @property
+    def resend_tick(self) -> int:
+        """How often (ms) to check for timed-out requests to resend.
+
+        The socket checks for timed-out requests at this interval.
+        Lower values add overhead, but are needed for short resend_time values.
+        
+        The default is 1000 ms.
+        """
+        self._check()
+        cdef nng_duration v
+        check_err(nng_socket_get_ms(self._handle.get().raw(), b"req:resend-tick", &v))
+        return v
+
+    @resend_tick.setter
+    def resend_tick(self, int ms):
+        self._check()
+        check_err(nng_socket_set_ms(self._handle.get().raw(), b"req:resend-tick", ms))
 
     def open_context(self) -> Context:
         """Open an independent REQ context on this socket.
@@ -1099,24 +1374,26 @@ cdef class RepSocket(Socket):
     """Reply socket — receives a request and sends exactly one reply.
 
     The REP/REQ protocol enforces a strict receive → send → receive → … cycle
-    on each context.  Attempting to receive a second request before replying to
-    the first raises an error.
+    on each context.  Attempting to send a reply before receiving a request, or
+    to receive a second request before replying to the first, raises
+    ``NngState``.
 
     **Serving multiple concurrent clients**
 
     A single ``RepSocket`` can be connected to any number of request senders
-    (via :meth:`listen` or :meth:`dial`).  However, the socket-level
-    :meth:`recv` / :meth:`send` cycle handles only **one request at a time**.
+    (via :meth:`add_listener` or :meth:`add_dialer`).  However, the
+    socket-level :meth:`recv` / :meth:`send` cycle handles only **one request
+    at a time** — only one receive operation may be pending simultaneously.
     To serve multiple clients concurrently without blocking, open independent
     per-client contexts with :meth:`open_context`; each context carries the
     reply-routing state for one in-flight request.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_rep0_open_raw(&raw_sock) if raw
-                  else nng_rep0_open(&raw_sock))
+        check_err(nng_rep0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
     def open_context(self) -> Context:
         """Open an independent REP context on this socket.
@@ -1139,16 +1416,41 @@ cdef class PushSocket(Socket):
 
     * Messages are never duplicated — each goes to one worker.
     * If there are no connected peers the send blocks (or raises
-      :exc:`NngAgain` in non-blocking mode) until a peer is available.
-    * PushSocket is send-only.
+      :exc:`NngAgain` in non-blocking mode) until a peer is available.  Back-
+      pressure is honoured: only peers capable of accepting a message are
+      considered.
+    * PushSocket is send-only; :meth:`recv` raises ``NngNotSupported``.
+    * **No delivery guarantee**: there is no acknowledgment mechanism.  If
+      reliable delivery is required, consider :class:`ReqSocket` instead.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_push0_open_raw(&raw_sock) if raw
-                  else nng_push0_open(&raw_sock))
+        check_err(nng_push0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
+    @property
+    def send_buffer_length(self) -> int:
+        """Maximum number of messages that can be buffered for sending to a peer.
+
+        Default (0), means operations are unbuffers, and sending will block
+        until a peer is available to receive the message.
+
+        Setting a positive value queues to an intermediate buffer of that many
+        messages.
+
+        The maximum value is 8192.
+        """
+        self._check()
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), b"send-buffer", &v))
+        return v
+
+    @send_buffer_length.setter
+    def send_buffer_length(self, int length):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), b"send-buffer", length))
 
 cdef class PullSocket(Socket):
     """Pull socket — receives work items distributed by a :class:`PushSocket`.
@@ -1158,34 +1460,48 @@ cdef class PullSocket(Socket):
     instances connected to the same ``PushSocket`` act as a pool of workers:
     nng load-balances across them automatically.
 
-    * PullSocket is receive-only.
+    When two peers both have a message ready simultaneously, the order in which
+    messages are delivered to the application is undefined.
+
+    * PullSocket is receive-only; :meth:`send` raises ``NngNotSupported``.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_pull0_open_raw(&raw_sock) if raw
-                  else nng_pull0_open(&raw_sock))
+        check_err(nng_pull0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
 
 cdef class SurveyorSocket(Socket):
     """Surveyor socket — broadcasts a survey and collects responses within a deadline.
 
     Sending a message broadcasts it to **all** connected
-    :class:`RespondentSocket` peers (like PUB).  The surveyor then receives
-    responses from as many respondents as reply within :attr:`survey_time`
-    milliseconds.  After the deadline, further receives raise
-    :exc:`NngError` with ``NNG_ETIMEDOUT``.
+    :class:`RespondentSocket` peers.  Respondents are not obliged to reply;
+    the surveyor collects as many responses as arrive within :attr:`survey_time`
+    milliseconds.  After the deadline expires, further :meth:`recv` calls raise
+    :exc:`NngError` with ``NngTimeout`` and :meth:`recv` before any survey
+    has been sent raises ``NngState``.
+
+    Sending a new survey **cancels** the previous one; any responses from the
+    earlier survey that arrive afterwards are silently discarded.
+
+    Each connected respondent normally sends at most one reply per survey,
+    though duplicates are possible in some topologies.
+
+    Useful for solving voting / leader-election and service-discovery problems.
 
     Each send opens a new survey; the previous survey's results are discarded.
-    Use :meth:`open_context` to run multiple independent surveys concurrently.
+    Use :meth:`open_context` to run multiple independent surveys concurrently;
+    each context maintains its own deadline and does not cancel surveys on
+    other contexts.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_surveyor0_open_raw(&raw_sock) if raw
-                  else nng_surveyor0_open(&raw_sock))
+        check_err(nng_surveyor0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
     @property
     def survey_time(self) -> int:
@@ -1193,7 +1509,7 @@ cdef class SurveyorSocket(Socket):
 
         After sending a survey, the socket accepts responses for this long.
         Once the deadline expires, :meth:`recv` raises :exc:`NngError` with
-        ``NNG_ETIMEDOUT``.  The next :meth:`send` starts a fresh survey.
+        ``NngTimeout``.  The next :meth:`send` starts a fresh survey.
         """
         self._check()
         cdef nng_duration v
@@ -1218,13 +1534,22 @@ cdef class RespondentSocket(Socket):
     and :meth:`send` delivers the response back to the surveyor that sent it.
     Multiple respondents can reply to the same survey; the surveyor collects
     all replies within its deadline.
+
+    A respondent may choose to discard a survey by simply not replying to it.
+    Attempting to :meth:`send` without first receiving a survey raises
+    ``NngState``.
+
+    Useful for voting / leader-election and service-discovery problems.
+
+    Use :meth:`open_context` to receive and respond to multiple surveys in
+    parallel; each context has its own independent state machine.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_respondent0_open_raw(&raw_sock) if raw
-                  else nng_respondent0_open(&raw_sock))
+        check_err(nng_respondent0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()
 
     def open_context(self) -> Context:
         """Open an independent respondent context on this socket."""
@@ -1236,20 +1561,28 @@ cdef class BusSocket(Socket):
     """Bus socket — broadcasts each message to **all** other connected bus nodes.
 
     Every message sent on a ``BusSocket`` is forwarded to every other
-    ``BusSocket`` peer connected to it.  Unlike PUB/SUB there is no topic
-    filtering and the bus is symmetric: all peers can both send and receive.
+    ``BusSocket`` peer **directly** connected to it.  Unlike PUB/SUB there is
+    no topic filtering and the bus is symmetric: all peers can both send and
+    receive.
 
     Typical use case: all-to-all communication where every node needs to hear
     about events from every other node.
 
+    .. important::
+       Messages are only delivered to **directly** connected peers.  Peers
+       connected indirectly (e.g. via an intermediate node) will **not**
+       receive them.  To achieve true all-to-all communication you must build
+       a fully-connected mesh.
+
     .. note::
-       BUS does not provide delivery guarantees.  A slow peer whose send buffer
-       is full will have messages dropped silently, without affecting other
-       peers.
+       BUS delivery is **best-effort**: sends never block.  If a peer cannot
+       receive (e.g. its buffer is full), its copy of the message is silently
+       discarded without affecting other peers.  The protocol is not suitable
+       for high-throughput workloads where loss would be unacceptable.
     """
 
-    def __cinit__(self, *, bint raw=False):
+    def __cinit__(self):
         cdef nng_socket raw_sock
-        check_err(nng_bus0_open_raw(&raw_sock) if raw
-                  else nng_bus0_open(&raw_sock))
+        check_err(nng_bus0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._setup_pipe_tracking()

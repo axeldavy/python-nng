@@ -41,21 +41,26 @@ async def handle_requests(
     its lifetime is explicit: it stays open for exactly as long as this task is
     processing requests, and closes only after the last ``arecv`` has returned.
     """
+    # Create an independant channel to make requests on the shared socket.
     ctx = req.open_context()
 
+    # Send a fixed number of requests, then exit.
     for i in request_ids:
+        # Prepare and send request
         msg = f"task-{task_id}/req-{i}"
-        print(f"  [task-{task_id}] send  → {msg!r}")
-        await ctx.asend(msg.encode())
+        print(f"  [task-{task_id}] send  → '{msg}'")
+        await ctx.asend(msg)
 
-        reply = (await ctx.arecv()).decode()
-        print(f"  [task-{task_id}] recv  ← {reply!r}")
+        # Receive and handle reply
+        reply = await ctx.arecv()
+        print(f"  [task-{task_id}] recv  <= '{reply}'")
 
     # Note: we could close the context here with ctx.close().
     # It will be done automatically by the GC.
 
 
 async def main() -> None:
+    """Start a REQ client that sends NUM_REQUESTS messages to the server across NUM_PARALLEL_TASKS concurrent tasks."""
     print(f"Client connecting to {URL}")
     print(f"  {NUM_REQUESTS} request(s) across {NUM_PARALLEL_TASKS} parallel task(s)\n")
 

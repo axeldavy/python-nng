@@ -5,30 +5,48 @@ and message sizes, and collects results into a nested dict:
 
     results[metric][transport][msg_size][competitor] = Stats
 
-Where *metric* is one of ``"latency"``, ``"bandwidth"``, ``"ops"``.
+Where *metric* is one of ``"latency"`` or ``"ops"``.
+
+Server isolation strategy
+-------------------------
+* **inproc** — server runs in a :class:`threading.Thread`; client runs in a
+  second thread (so neither occupies the runner's main thread).
+* **ipc / tcp** — server runs in a :class:`multiprocessing.Process`; client
+  runs directly in the main runner process.
+
+Self-contained competitors (currently only ``c_nng``) launch their own server
+processes internally and bypass this orchestration.
 """
 
 from __future__ import annotations
 
+import gc
 import importlib
 import json
+import multiprocessing
+import threading
 import traceback
 from pathlib import Path
-from typing import Any
 
 from ._core.common import COMPETITORS, MSG_SIZES, TRANSPORTS, next_url, RESULTS_DIR
 from ._core.stats import Stats, compute_stats
 
 # Import all competitor modules so they register themselves in COMPETITORS.
 _COMPETITOR_MODULES = [
-    "benchmarks.competitors.nng_sync",
-    "benchmarks.competitors.nng_async",
-    "benchmarks.competitors.nng_async_old",
+    "benchmarks.competitors.nng_sync1",
+    "benchmarks.competitors.nng_sync2",
+    "benchmarks.competitors.nng_async1",
+    "benchmarks.competitors.nng_async2",
+    "benchmarks.competitors.nng_async3",
+    "benchmarks.competitors.nng_async4",
+    "benchmarks.competitors.nng_async5",
+    "benchmarks.competitors.nng_async6",
     "benchmarks.competitors.zmq_sync",
     "benchmarks.competitors.zmq_async",
     "benchmarks.competitors.pynng_sync",
     "benchmarks.competitors.pynng_async",
     "benchmarks.competitors.c_nng_bench",
+    "benchmarks.competitors.python_raw",
 ]
 
 Results = dict[str, dict[str, dict[int, dict[str, Stats]]]]
@@ -40,14 +58,20 @@ def _import_competitors(requested: list[str]) -> None:
         comp_name = mod_path.rsplit(".", 1)[-1]
         # Map module suffix → competitor name
         name_map = {
-            "nng_sync": "nng_sync",
-            "nng_async": "nng_async",
-            "nng_async_old": "nng_async_old",
+            "nng_sync1": "nng_sync1",
+            "nng_sync2": "nng_sync2",
+            "nng_async1": "nng_async1",
+            "nng_async2": "nng_async2",
+            "nng_async3": "nng_async3",
+            "nng_async4": "nng_async4",
+            "nng_async5": "nng_async5",
+            "nng_async6": "nng_async6",
             "zmq_sync": "zmq_sync",
             "zmq_async": "zmq_async",
             "pynng_sync": "pynng_sync",
             "pynng_async": "pynng_async",
             "c_nng_bench": "c_nng",
+            "python_raw": "python_raw",
         }
         friendly = name_map.get(comp_name, comp_name)
         if requested and friendly not in requested:
@@ -59,12 +83,73 @@ def _import_competitors(requested: list[str]) -> None:
 
 
 def _make_results() -> Results:
-    return {"latency": {}, "bandwidth": {}, "ops": {}}
+    return {"latency": {}, "ops": {}}
 
 
 def _ensure_nested(results: Results, metric: str, transport: str, msg_size: int) -> None:
     results[metric].setdefault(transport, {}).setdefault(msg_size, {})
 
+
+# ---------------------------------------------------------------------------
+# Server orchestration helpers
+# ---------------------------------------------------------------------------
+
+def _make_events(transport: str):
+    """Return (ready, stop) event objects suited for the transport's isolation mode."""
+    if transport == "inproc":
+        return threading.Event(), threading.Event()
+    return multiprocessing.Event(), multiprocessing.Event()
+
+
+def _launch_server(bench_cls, transport: str, url: str, ready, stop):
+    """Start the benchmark server in a thread (inproc) or process (ipc/tcp)."""
+    if transport == "inproc":
+        worker = threading.Thread(
+            target=bench_cls.run_server,
+            args=(url, ready, stop),
+            daemon=True,
+        )
+    else:
+        worker = multiprocessing.Process(
+            target=bench_cls.run_server,
+            args=(url, ready, stop),
+            daemon=True,
+        )
+    worker.start()
+    return worker
+
+
+def _stop_server(worker, stop_event) -> None:
+    """Signal the server to stop and wait for it to exit."""
+    stop_event.set()
+    worker.join(timeout=5)
+    if isinstance(worker, multiprocessing.Process) and worker.is_alive():
+        worker.kill()
+        worker.join(timeout=2)
+
+
+def _run_in_thread(fn, *args):
+    """Run *fn*\\(*args*) in a daemon thread; propagate any exception to the caller."""
+    result_box: list = [None]
+    exc_box: list = [None]
+
+    def _wrapper() -> None:
+        try:
+            result_box[0] = fn(*args)
+        except BaseException as exc:  # noqa: BLE001
+            exc_box[0] = exc
+
+    t = threading.Thread(target=_wrapper, daemon=True)
+    t.start()
+    t.join()
+    if exc_box[0] is not None:
+        raise exc_box[0]
+    return result_box[0]
+
+
+# ---------------------------------------------------------------------------
+# Main runner
+# ---------------------------------------------------------------------------
 
 def run(
     competitors: list[str] | None = None,
@@ -88,7 +173,7 @@ def run(
     n_warmup:
         Warmup iterations (discarded).
     n_iters:
-        Measured iterations for latency and bandwidth.
+        Measured iterations for latency.
     duration_s:
         Duration in seconds for ops/sec measurement.
     verbose:
@@ -109,8 +194,11 @@ def run(
                     print(f"  [warn] Unknown competitor: {comp_name!r} — skipping")
                     continue
 
-                bench = COMPETITORS[comp_name]()
-                url = next_url(transport)
+                bench_cls = COMPETITORS[comp_name]
+                bench = bench_cls()
+                # c_nng launches its own C server subprocesses internally;
+                # all other competitors expose run_server for the runner to use.
+                is_self_contained = (comp_name == "c_nng")
 
                 if verbose:
                     print(
@@ -118,40 +206,66 @@ def run(
                         end="", flush=True,
                     )
                 try:
-                    # --- Latency ---
-                    if hasattr(bench, "measure_latency_stats"):
-                        lat_stats = bench.measure_latency_stats(url, msg_size, n_warmup, n_iters)
+                    # ---- Latency ------------------------------------------------
+                    url = next_url(transport)
+
+                    if is_self_contained:
+                        if hasattr(bench, "measure_latency_stats"):
+                            lat_stats = bench.measure_latency_stats(
+                                url, msg_size, n_warmup, n_iters
+                            )
+                        else:
+                            lat_stats = compute_stats(
+                                bench.measure_latency(url, msg_size, n_warmup, n_iters)
+                            )
                     else:
-                        samples = bench.measure_latency(url, msg_size, n_warmup, n_iters)
+                        ready, stop = _make_events(transport)
+                        server = _launch_server(bench_cls, transport, url, ready, stop)
+                        if not ready.wait(timeout=5):
+                            _stop_server(server, stop)
+                            raise RuntimeError("Server did not become ready within 5 s")
+                        try:
+                            if transport == "inproc":
+                                samples = _run_in_thread(
+                                    bench.measure_latency, url, msg_size, n_warmup, n_iters
+                                )
+                            else:
+                                samples = bench.measure_latency(
+                                    url, msg_size, n_warmup, n_iters
+                                )
+                        finally:
+                            _stop_server(server, stop)
                         lat_stats = compute_stats(samples)
 
                     _ensure_nested(results, "latency", transport, msg_size)
                     results["latency"][transport][msg_size][comp_name] = lat_stats
 
                     if verbose:
-                        print(f" p50={lat_stats.p50:.1f}µs | bandwidth …", end="", flush=True)
+                        print(f" p50={lat_stats.p50:.1f}µs | ops …", end="", flush=True)
 
-                    # Use a fresh URL for bandwidth to avoid port reuse issues
-                    url_bw = next_url(transport)
-
-                    # --- Bandwidth ---
-                    if hasattr(bench, "measure_bandwidth_stats"):
-                        bw_stats = bench.measure_bandwidth_stats(url_bw, msg_size, n_warmup, n_iters)
-                    else:
-                        bw_samples = bench.measure_bandwidth(url_bw, msg_size, n_warmup, n_iters)
-                        bw_stats = compute_stats(bw_samples)
-
-                    _ensure_nested(results, "bandwidth", transport, msg_size)
-                    results["bandwidth"][transport][msg_size][comp_name] = bw_stats
-
-                    if verbose:
-                        print(f" p50={bw_stats.p50:.2f}MB/s | ops …", end="", flush=True)
-
-                    # Use a fresh URL for ops
+                    # ---- Ops/sec ------------------------------------------------
                     url_ops = next_url(transport)
 
-                    # --- Ops/sec ---
-                    ops_mean = bench.measure_ops(url_ops, msg_size, duration_s)
+                    if is_self_contained:
+                        ops_mean = bench.measure_ops(url_ops, msg_size, duration_s)
+                    else:
+                        ready_ops, stop_ops = _make_events(transport)
+                        server_ops = _launch_server(
+                            bench_cls, transport, url_ops, ready_ops, stop_ops
+                        )
+                        if not ready_ops.wait(timeout=5):
+                            _stop_server(server_ops, stop_ops)
+                            raise RuntimeError("Server (ops) did not become ready within 5 s")
+                        try:
+                            if transport == "inproc":
+                                ops_mean = _run_in_thread(
+                                    bench.measure_ops, url_ops, msg_size, duration_s
+                                )
+                            else:
+                                ops_mean = bench.measure_ops(url_ops, msg_size, duration_s)
+                        finally:
+                            _stop_server(server_ops, stop_ops)
+
                     ops_stats = Stats(
                         min=ops_mean, p50=ops_mean, p95=ops_mean,
                         p99=ops_mean, max=ops_mean, mean=ops_mean,
@@ -168,8 +282,11 @@ def run(
                         print(f" skipped ({exc})")
                 except Exception:
                     if verbose:
-                        print(f" ERROR")
+                        print(" ERROR")
                     traceback.print_exc()
+                finally:
+                    del bench
+                    gc.collect()
 
     return results
 
@@ -196,6 +313,8 @@ def json_to_results(data: dict) -> Results:
     """Inverse of :func:`results_to_json`."""
     results = _make_results()
     for metric, transports in data.items():
+        if metric not in results:
+            continue  # ignore stale keys (e.g. "bandwidth" from old result files)
         for transport, sizes in transports.items():
             for msg_size_str, comps in sizes.items():
                 msg_size = int(msg_size_str)
@@ -219,3 +338,4 @@ def load_results(path: Path) -> Results:
     """Load results from a JSON file."""
     data = json.loads(path.read_text(encoding="utf-8"))
     return json_to_results(data)
+

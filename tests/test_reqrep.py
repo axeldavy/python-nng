@@ -27,10 +27,10 @@ def test_reqrep_message():
         rep.add_listener(URL + "_msg").start()
         req.add_dialer(URL + "_msg").start()
 
-        req.send_msg(nng.Message(b"hello"))
-        msg = rep.recv_msg()
+        req.send(nng.Message(b"hello"))
+        msg = rep.recv()
         assert msg.to_bytes() == b"hello"
-        rep.send_msg(nng.Message(b"world"))
+        rep.send(nng.Message(b"world"))
         assert req.recv() == b"world"
 
 
@@ -51,7 +51,7 @@ async def test_reqrep_async():
 
         async def server():
             data = await rep.arecv()
-            await rep.asend(data[::-1])    # reverse
+            await rep.asend(data.to_bytes()[::-1])    # reverse
 
         await asyncio.gather(server(), req.asend(b"abcde"))
         reply = await req.arecv()
@@ -91,7 +91,7 @@ async def test_context_concurrent():
 
 async def _ctx_roundtrip(ctx: nng.Context, data: bytes) -> bytes:
     await ctx.asend(data)
-    return await ctx.arecv()
+    return (await ctx.arecv()).to_bytes()
 
 
 def test_context_sync():

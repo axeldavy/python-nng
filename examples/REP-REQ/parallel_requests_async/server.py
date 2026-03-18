@@ -47,31 +47,39 @@ async def process(request: str) -> str:
 async def handle_requests(
     rep: nng.RepSocket, task_id: int, counter: Counter, done_event: asyncio.Event
 ) -> None:
-    """Open one Context on *rep* and serve requests from the shared counter.
-
-    The context is closed in a ``finally`` block so it is released only after
-    the last ``asend`` has returned — guaranteeing no reply is dropped.
-    """
+    """Open one Context on *rep* and serve requests from the shared counter."""
+    # Create a context
     ctx = rep.open_context()
     while True:
-        data = await ctx.arecv()
-        request = data.decode()
+        # Wait the context receives a task
+        # NOTE: clients get different contexts on each request.
+        request = await ctx.arecv()
 
+        # Track number of requests served across all tasks with the shared counter.
         current_request_id = counter.next()
-        print(f"  [task-{task_id}] recv ({current_request_id}/{NUM_REQUESTS})  ← {request!r}")
+        print(f"  [task-{task_id}] recv ({current_request_id}/{NUM_REQUESTS})  <= '{request}'")
 
+        # Prepare the reply
         reply = await process(request)
 
-        await ctx.asend(reply.encode())
-        print(f"  [task-{task_id}] sent ({current_request_id}/{NUM_REQUESTS})  → {reply!r}")
+        # Send the reply back to the client.
+        # The context ensures that this reply goes to the correct client,
+        # even if other tasks are receiving and replying concurrently on the same socket.
+        await ctx.asend(reply)
+        print(f"  [task-{task_id}] sent ({current_request_id}/{NUM_REQUESTS})  => '{reply}'")
 
+        # Stop when enough requests have been served.
         if current_request_id >= NUM_REQUESTS:
             done_event.set()  # signal that all requests have been served
             print(f"  [task-{task_id}] reached request limit, exiting")
             break
+    # NOTE: the context is automatically closed as it gets released by the GC
+    # when this function closes. It is also closed automatically when
+    # the socket is closed. It could be manually closed here with ctx.close().
 
 
 async def main() -> None:
+    """Start a REP server that serves NUM_REQUESTS messages across NUM_PARALLEL_TASKS concurrent tasks."""
     print(f"Server listening on {URL}")
     print(f"  {NUM_REQUESTS} request(s) across {NUM_PARALLEL_TASKS} parallel task(s)\n")
 
@@ -82,6 +90,8 @@ async def main() -> None:
         done_event = asyncio.Event()  # signals when all requests have been served
         counter = Counter()
 
+        # Start multiple request-handling tasks to run concurrently. Each task can process
+        # one request at a time.
         async with asyncio.TaskGroup() as tg:
             tasks = []
             for task_id in range(1, NUM_PARALLEL_TASKS + 1):
@@ -89,12 +99,14 @@ async def main() -> None:
                     tg.create_task(handle_requests(rep, task_id, counter, done_event))
                 )
 
-            await done_event.wait()  # wait until all requests have been served
+            # Wait until all requests have been served
+            await done_event.wait() 
+
+            # Cancel any still-running context
             for task in tasks:
-                task.cancel()  # cancel any still-running context
+                task.cancel()
 
-    print("\nServer done.")
-
+    print("\nServer done.\n")
 
 if __name__ == "__main__":
     try:

@@ -1,4 +1,13 @@
-"""Benchmark competitor: python-nng synchronous REQ/REP via Contexts."""
+"""Benchmark competitor: python-nng synchronous REQ/REP via send/recv.
+
+Blocking send/recv are the fastest way to send/receive messages.
+Indeed they have the least overhead as they avoid the additional future/promise machinery,
+and the use of internal nng threads for async submission and completion.
+
+However be aware that when blocking, Python signals are not handled until the blocking call
+returns. For that reason, prefer the alternatives, or use with care in a dedicated thread.
+You can stop a blocking recv/send by closing the socket from another thread.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +20,16 @@ from .._core.common import COMPETITORS
 
 
 class NngSyncBenchmark(BaseBenchmark):
-    """Measures python-nng with blocking send/recv on a Context."""
+    """Measures python-nng with blocking send/recv."""
 
-    name = "nng_sync"
+    name = "nng_sync1"
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _run_server(url: str, ready: threading.Event, stop: threading.Event) -> None:
+    @classmethod
+    def run_server(cls, url: str, ready, stop) -> None:
         nng = import_nng()
         with nng.RepSocket() as rep:
             rep.recv_timeout = 200  # ms – check stop flag periodically
@@ -29,7 +38,7 @@ class NngSyncBenchmark(BaseBenchmark):
             while not stop.is_set():
                 try:
                     msg = rep.recv()
-                    rep.send(msg)
+                    rep.send(b"")
                 except nng.NngTimeout:
                     pass
                 except nng.NngClosed:
@@ -48,17 +57,6 @@ class NngSyncBenchmark(BaseBenchmark):
     ) -> list[float]:
         nng = import_nng()
         payload = bytes(msg_size)
-        ready = threading.Event()
-        stop = threading.Event()
-
-        server = threading.Thread(
-            target=self._run_server,
-            args=(transport_url, ready, stop),
-            daemon=True,
-        )
-        server.start()
-        ready.wait(timeout=5)
-
         samples: list[float] = []
         with nng.ReqSocket() as req:
             req.add_dialer(transport_url).start(block=True)
@@ -73,53 +71,6 @@ class NngSyncBenchmark(BaseBenchmark):
                 req.recv()
                 t1 = time.perf_counter()
                 samples.append((t1 - t0) * 1e6)
-
-        stop.set()
-        server.join(timeout=2)
-        return samples
-
-    # ------------------------------------------------------------------
-    # Bandwidth
-    # ------------------------------------------------------------------
-
-    def measure_bandwidth(
-        self,
-        transport_url: str,
-        msg_size: int,
-        n_warmup: int,
-        n_iters: int,
-    ) -> list[float]:
-        """Bandwidth = msg_size / RTT per round-trip (MB/s)."""
-        nng = import_nng()
-        payload = bytes(msg_size)
-        ready = threading.Event()
-        stop = threading.Event()
-
-        server = threading.Thread(
-            target=self._run_server,
-            args=(transport_url, ready, stop),
-            daemon=True,
-        )
-        server.start()
-        ready.wait(timeout=5)
-
-        samples: list[float] = []
-        with nng.ReqSocket() as req:
-            req.add_dialer(transport_url).start(block=True)
-            for _ in range(n_warmup):
-                req.send(payload)
-                req.recv()
-            for _ in range(n_iters):
-                t0 = time.perf_counter()
-                req.send(payload)
-                req.recv()
-                t1 = time.perf_counter()
-                elapsed = t1 - t0
-                # Two message payloads travel: request + response
-                samples.append(2 * msg_size / elapsed / 1e6)
-
-        stop.set()
-        server.join(timeout=2)
         return samples
 
     # ------------------------------------------------------------------
@@ -134,17 +85,6 @@ class NngSyncBenchmark(BaseBenchmark):
     ) -> float:
         nng = import_nng()
         payload = bytes(msg_size)
-        ready = threading.Event()
-        stop = threading.Event()
-
-        server = threading.Thread(
-            target=self._run_server,
-            args=(transport_url, ready, stop),
-            daemon=True,
-        )
-        server.start()
-        ready.wait(timeout=5)
-
         count = 0
         with nng.ReqSocket() as req:
             req.add_dialer(transport_url).start(block=True)
@@ -153,10 +93,7 @@ class NngSyncBenchmark(BaseBenchmark):
                 req.send(payload)
                 req.recv()
                 count += 1
-
-        stop.set()
-        server.join(timeout=2)
         return count / duration_s
 
 
-COMPETITORS["nng_sync"] = NngSyncBenchmark
+COMPETITORS["nng_sync1"] = NngSyncBenchmark

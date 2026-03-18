@@ -8,18 +8,35 @@ from abc import ABC, abstractmethod
 class BaseBenchmark(ABC):
     """Protocol-agnostic benchmark interface.
 
-    Each subclass sets up its own server and client (in threads or async tasks)
-    for the requested transport URL and measures the desired metric.
+    The runner is responsible for launching the server (in a thread for inproc,
+    or in a separate process for ipc/tcp) via :meth:`run_server`, waiting for
+    it to be ready, then calling :meth:`measure_latency` / :meth:`measure_ops`
+    (client-only — no server spawning inside those methods).
 
     All timing values are in **microseconds (µs)**.
-    Bandwidth values are in **megabytes per second (MB/s)**.
     """
 
     #: Human-readable short name used in tables and plots.
     name: str = "unknown"
 
     # ------------------------------------------------------------------
-    # Latency
+    # Server entry point (called by the runner in a thread or process)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def run_server(cls, url: str, ready, stop) -> None:
+        """Run the REP server synchronously until *stop* is set.
+
+        *ready* and *stop* are either :class:`threading.Event` or
+        :class:`multiprocessing.Event` objects — both share the same API.
+        Subclasses must override this method.  The default raises
+        :exc:`NotImplementedError` (for self-contained competitors like c_nng
+        that manage their own server process internally).
+        """
+        raise NotImplementedError(f"{cls.__name__} does not implement run_server")
+
+    # ------------------------------------------------------------------
+    # Latency  (client-only — server is already running at transport_url)
     # ------------------------------------------------------------------
 
     @abstractmethod
@@ -32,40 +49,19 @@ class BaseBenchmark(ABC):
     ) -> list[float]:
         """Return per-round-trip latency samples in µs.
 
+        The server is already listening at *transport_url* when this is called.
         The implementation must:
-        1. Start a server in a background thread / task.
+        1. Connect a client socket.
         2. Perform *n_warmup* round-trips (discarded).
         3. Record *n_iters* round-trips and return the list of RTT durations.
-        4. Cleanly shut down server and client.
+        4. Close the client socket.
 
-        Each sample is a one-way RTT measured on the *client* side:
+        Each sample is a round-trip time measured on the client side:
         ``(t_after_recv - t_before_send) * 1e6``.
         """
 
     # ------------------------------------------------------------------
-    # Bandwidth
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def measure_bandwidth(
-        self,
-        transport_url: str,
-        msg_size: int,
-        n_warmup: int,
-        n_iters: int,
-    ) -> list[float]:
-        """Return per-burst bandwidth samples in MB/s.
-
-        The implementation sends *n_warmup + n_iters* messages and measures
-        throughput per burst of messages (or per message for single-pair
-        request-reply where we measure how many bytes per second flow).
-
-        Bandwidth = (msg_size bytes) / (RTT seconds) converted to MB/s.
-        For push/pull style, measure total bytes / total time per window.
-        """
-
-    # ------------------------------------------------------------------
-    # Ops/sec
+    # Ops/sec  (client-only — server is already running at transport_url)
     # ------------------------------------------------------------------
 
     @abstractmethod
@@ -77,9 +73,7 @@ class BaseBenchmark(ABC):
     ) -> float:
         """Return mean ops/sec over a sustained *duration_s* second window.
 
-        Unlike *measure_latency*, the server and client run as fast as
-        possible for the given duration and the total operation count is
-        divided by elapsed wall-clock time.
+        The server is already listening at *transport_url* when this is called.
         """
 
     # ------------------------------------------------------------------

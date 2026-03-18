@@ -1,14 +1,17 @@
 /*
  * bench_client.c — nng REQ benchmark client.
  *
- * Usage: bench_client <url> <msg_size> <n_warmup> <n_iters>
+ * Usage (latency): bench_client <url> <msg_size> <n_warmup> <n_iters>
+ * Usage (ops):     bench_client <url> <msg_size> <n_warmup> <n_iters> <duration_s>
  *
- * Performs n_warmup + n_iters round-trips against the REP server at <url>.
- * Warmup samples are discarded.  Measured round-trip times are reported as a
- * JSON object on stdout with keys: min_us, p50_us, p95_us, p99_us, max_us,
- * mean_us, std_us, n, ops_per_sec.
+ * When <duration_s> is supplied the measured section loops until the wall-clock
+ * deadline instead of for a fixed iteration count.  This prevents hangs with
+ * large messages where a fixed-count run would take far longer than intended.
+ * <n_iters> is still required as a placeholder but is ignored for the measured
+ * loop; it is only used during warmup (capped at n_warmup).
  *
- * Timing uses CLOCK_MONOTONIC for microsecond resolution.
+ * Outputs JSON with keys: min_us, p50_us, p95_us, p99_us, max_us, mean_us,
+ * std_us, n, ops_per_sec.  In ops mode the per-sample latency fields are 0.
  */
 
 #include <math.h>
@@ -72,7 +75,7 @@ int main(int argc, char *argv[])
 {
     if (argc < 5) {
         fprintf(stderr,
-                "Usage: bench_client <url> <msg_size> <n_warmup> <n_iters>\n");
+                "Usage: bench_client <url> <msg_size> <n_warmup> <n_iters> [duration_s]\n");
         return 1;
     }
 
@@ -80,9 +83,11 @@ int main(int argc, char *argv[])
     size_t      msg_size = (size_t)atol(argv[2]);
     int         n_warmup = atoi(argv[3]);
     int         n_iters  = atoi(argv[4]);
+    int         ops_mode = (argc >= 6);
+    double      duration_s = ops_mode ? atof(argv[5]) : 0.0;
 
-    if (msg_size == 0 || n_iters <= 0) {
-        fprintf(stderr, "msg_size and n_iters must be > 0\n");
+    if (msg_size == 0 || (!ops_mode && n_iters <= 0)) {
+        fprintf(stderr, "msg_size must be > 0; n_iters must be > 0 in latency mode\n");
         return 1;
     }
 
@@ -117,12 +122,16 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    double *samples = (double *)malloc((size_t)n_iters * sizeof(double));
-    if (!samples) {
-        fprintf(stderr, "malloc failed for samples\n");
-        free(payload);
-        nng_socket_close(req);
-        return 1;
+    /* In ops mode we only need a counter — no per-sample array. */
+    double *samples = NULL;
+    if (!ops_mode) {
+        samples = (double *)malloc((size_t)n_iters * sizeof(double));
+        if (!samples) {
+            fprintf(stderr, "malloc failed for samples\n");
+            free(payload);
+            nng_socket_close(req);
+            return 1;
+        }
     }
 
     nng_msg *smsg = NULL;
@@ -140,53 +149,83 @@ int main(int argc, char *argv[])
 
     /* ---------- measured ---------- */
     double t_start = now_us();
+    long   ops_count = 0;
 
-    for (int i = 0; i < n_iters; i++) {
-        if ((rv = nng_msg_alloc(&smsg, msg_size)) != 0) goto err;
-        memcpy(nng_msg_body(smsg), payload, msg_size);
+    if (ops_mode) {
+        double deadline = t_start + duration_s * 1e6;
+        while (now_us() < deadline) {
+            if ((rv = nng_msg_alloc(&smsg, msg_size)) != 0) goto err;
+            memcpy(nng_msg_body(smsg), payload, msg_size);
+            if ((rv = nng_sendmsg(req, smsg, 0)) != 0) { nng_msg_free(smsg); smsg = NULL; goto err; }
+            smsg = NULL;
+            if ((rv = nng_recvmsg(req, &rmsg, 0)) != 0) goto err;
+            nng_msg_free(rmsg); rmsg = NULL;
+            ops_count++;
+        }
+    } else {
+        for (int i = 0; i < n_iters; i++) {
+            if ((rv = nng_msg_alloc(&smsg, msg_size)) != 0) goto err;
+            memcpy(nng_msg_body(smsg), payload, msg_size);
 
-        double t0 = now_us();
-        if ((rv = nng_sendmsg(req, smsg, 0)) != 0) { nng_msg_free(smsg); goto err; }
-        smsg = NULL;
-        if ((rv = nng_recvmsg(req, &rmsg, 0)) != 0) goto err;
-        double t1 = now_us();
+            double t0 = now_us();
+            if ((rv = nng_sendmsg(req, smsg, 0)) != 0) { nng_msg_free(smsg); goto err; }
+            smsg = NULL;
+            if ((rv = nng_recvmsg(req, &rmsg, 0)) != 0) goto err;
+            double t1 = now_us();
 
-        nng_msg_free(rmsg); rmsg = NULL;
-        samples[i] = t1 - t0;
+            nng_msg_free(rmsg); rmsg = NULL;
+            samples[i] = t1 - t0;
+        }
     }
 
     double t_end = now_us();
     double elapsed_s = (t_end - t_start) / 1e6;
 
     /* ---------- statistics ---------- */
-    qsort(samples, (size_t)n_iters, sizeof(double), cmp_double);
+    if (ops_mode) {
+        printf("{\n"
+               "  \"min_us\":      0,\n"
+               "  \"p50_us\":      0,\n"
+               "  \"p95_us\":      0,\n"
+               "  \"p99_us\":      0,\n"
+               "  \"max_us\":      0,\n"
+               "  \"mean_us\":     0,\n"
+               "  \"std_us\":      0,\n"
+               "  \"n\":           %ld,\n"
+               "  \"ops_per_sec\": %.1f\n"
+               "}\n",
+               ops_count,
+               elapsed_s > 0.0 ? (double)ops_count / elapsed_s : 0.0);
+    } else {
+        qsort(samples, (size_t)n_iters, sizeof(double), cmp_double);
 
-    double sum = 0.0, sum2 = 0.0;
-    for (int i = 0; i < n_iters; i++) { sum += samples[i]; sum2 += samples[i] * samples[i]; }
-    double mean = sum / (double)n_iters;
-    double variance = sum2 / (double)n_iters - mean * mean;
-    double std_dev = variance > 0.0 ? sqrt(variance) : 0.0;
+        double sum = 0.0, sum2 = 0.0;
+        for (int i = 0; i < n_iters; i++) { sum += samples[i]; sum2 += samples[i] * samples[i]; }
+        double mean = sum / (double)n_iters;
+        double variance = sum2 / (double)n_iters - mean * mean;
+        double std_dev = variance > 0.0 ? sqrt(variance) : 0.0;
 
-    printf("{\n"
-           "  \"min_us\":     %.3f,\n"
-           "  \"p50_us\":     %.3f,\n"
-           "  \"p95_us\":     %.3f,\n"
-           "  \"p99_us\":     %.3f,\n"
-           "  \"max_us\":     %.3f,\n"
-           "  \"mean_us\":    %.3f,\n"
-           "  \"std_us\":     %.3f,\n"
-           "  \"n\":          %d,\n"
-           "  \"ops_per_sec\": %.1f\n"
-           "}\n",
-           samples[0],
-           percentile(samples, (size_t)n_iters, 50.0),
-           percentile(samples, (size_t)n_iters, 95.0),
-           percentile(samples, (size_t)n_iters, 99.0),
-           samples[n_iters - 1],
-           mean,
-           std_dev,
-           n_iters,
-           elapsed_s > 0 ? (double)n_iters / elapsed_s : 0.0);
+        printf("{\n"
+               "  \"min_us\":     %.3f,\n"
+               "  \"p50_us\":     %.3f,\n"
+               "  \"p95_us\":     %.3f,\n"
+               "  \"p99_us\":     %.3f,\n"
+               "  \"max_us\":     %.3f,\n"
+               "  \"mean_us\":    %.3f,\n"
+               "  \"std_us\":     %.3f,\n"
+               "  \"n\":          %d,\n"
+               "  \"ops_per_sec\": %.1f\n"
+               "}\n",
+               samples[0],
+               percentile(samples, (size_t)n_iters, 50.0),
+               percentile(samples, (size_t)n_iters, 95.0),
+               percentile(samples, (size_t)n_iters, 99.0),
+               samples[n_iters - 1],
+               mean,
+               std_dev,
+               n_iters,
+               elapsed_s > 0 ? (double)n_iters / elapsed_s : 0.0);
+    }
 
     free(payload);
     free(samples);
@@ -196,6 +235,8 @@ int main(int argc, char *argv[])
 
 err:
     fprintf(stderr, "nng error: %s\n", nng_strerror(rv));
+    if (smsg) nng_msg_free(smsg);
+    if (rmsg) nng_msg_free(rmsg);
     free(payload);
     free(samples);
     nng_socket_close(req);

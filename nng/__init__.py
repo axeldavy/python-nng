@@ -48,8 +48,7 @@ from nng._nng import (
     Context,
     Dialer,
     Listener,
-    Pipe,
-    TlsConfig,
+    Pipe,    PipeStatus,    TlsConfig,
 
     # ── Errors ───────────────────────────────────────────────────────────
     NngError,
@@ -69,7 +68,7 @@ from nng._nng import (
     NngAuthError,
     NngCryptoError,
 
-    # ── Pipe event constants ──────────────────────────────────────────────
+    # ── Pipe event constants (kept for backward compatibility) ──────────────
     PIPE_EV_ADD_PRE,
     PIPE_EV_ADD_POST,
     PIPE_EV_REM_POST,
@@ -96,14 +95,14 @@ __all__ = [
     "SurveyorSocket", "RespondentSocket",
     "BusSocket",
     # Types
-    "Message", "Context", "Dialer", "Listener", "Pipe", "TlsConfig",
+    "Message", "Context", "Dialer", "Listener", "Pipe", "PipeStatus", "TlsConfig",
     # Errors
     "NngError", "NngTimeout", "NngConnectionRefused", "NngClosed",
     "NngAgain", "NngNotSupported", "NngAddressInUse", "NngPermission",
     "NngCanceled", "NngConnectionReset", "NngConnectionAborted",
     "NngNoMemory", "NngInvalidArgument", "NngState",
     "NngAuthError", "NngCryptoError",
-    # Pipe events
+    # Pipe events (backward compat)
     "PIPE_EV_ADD_PRE", "PIPE_EV_ADD_POST", "PIPE_EV_REM_POST",
     # TLS
     "TLS_AUTH_NONE", "TLS_AUTH_OPTIONAL", "TLS_AUTH_REQUIRED",

@@ -34,13 +34,30 @@ add_executable(bench_server bench_server.c)
 target_link_libraries(bench_server PRIVATE nng)
 target_include_directories(bench_server PRIVATE "${NNG_SUBMODULE}/include")
 
-# ── bench_client ─────────────────────────────────────────────────────────────
-add_executable(bench_client bench_client.c)
-target_link_libraries(bench_client PRIVATE nng m)
-target_include_directories(bench_client PRIVATE "${NNG_SUBMODULE}/include")
+# ── bench_client_lat ─────────────────────────────────────────────────────────
+add_executable(bench_client_lat bench_client_lat.c)
+target_link_libraries(bench_client_lat PRIVATE nng m)
+target_include_directories(bench_client_lat PRIVATE "${NNG_SUBMODULE}/include")
+
+# ── bench_client_ops ─────────────────────────────────────────────────────────
+add_executable(bench_client_ops bench_client_ops.c)
+target_link_libraries(bench_client_ops PRIVATE nng m)
+target_include_directories(bench_client_ops PRIVATE "${NNG_SUBMODULE}/include")
+
+# ── bench_inproc_lat ─────────────────────────────────────────────────────────
+# Server thread + REQ client in one process — required for inproc:// latency.
+add_executable(bench_inproc_lat bench_inproc_lat.c)
+target_link_libraries(bench_inproc_lat PRIVATE nng m)
+target_include_directories(bench_inproc_lat PRIVATE "${NNG_SUBMODULE}/include")
+
+# ── bench_inproc_ops ─────────────────────────────────────────────────────────
+# Server thread + REQ client in one process — required for inproc:// ops/sec.
+add_executable(bench_inproc_ops bench_inproc_ops.c)
+target_link_libraries(bench_inproc_ops PRIVATE nng m)
+target_include_directories(bench_inproc_ops PRIVATE "${NNG_SUBMODULE}/include")
 
 # Compiler settings
-foreach(_tgt bench_server bench_client)
+foreach(_tgt bench_server bench_client_lat bench_client_ops bench_inproc_lat bench_inproc_ops)
     target_compile_options(${_tgt} PRIVATE
         $<$<C_COMPILER_ID:GNU,Clang>:-O2 -Wall -Wextra>)
 endforeach()

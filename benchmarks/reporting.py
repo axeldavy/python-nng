@@ -21,7 +21,7 @@ from ._core.stats import Stats
 # ---------------------------------------------------------------------------
 # results structure:
 #   results[metric][transport][msg_size][competitor] = Stats
-#   metric in {"latency", "bandwidth", "ops"}
+#   metric in {"latency", "ops"}
 Results = dict[str, dict[str, dict[int, dict[str, Stats]]]]
 
 # ---------------------------------------------------------------------------
@@ -40,10 +40,20 @@ def _fmt_size(n: int) -> str:
 def _competitors_ordered(data: dict[str, Stats]) -> list[str]:
     """Return competitor names in deterministic order."""
     prefer = [
+        "python_raw",
         "c_nng",
-        "nng_sync", "nng_async", "nng_async_old",
-        "zmq_sync", "zmq_async",
-        "pynng_sync", "pynng_async",
+        "nng_sync1",
+        "nng_sync2",
+        "nng_async1",
+        "nng_async2",
+        "nng_async3",
+        "nng_async4",
+        "nng_async5",
+        "nng_async6",
+        "zmq_sync",
+        "zmq_async",
+        "pynng_sync",
+        "pynng_async",
     ]
     keys = list(data.keys())
     ordered = [k for k in prefer if k in keys]
@@ -80,32 +90,6 @@ class MarkdownReporter:
             s = data[comp]
             rows.append(
                 f"| {comp} | {s.min:.1f} | {s.p50:.1f} | {s.p95:.1f} | {s.p99:.1f} | {s.max:.1f} |"
-            )
-        return "\n".join(rows) + "\n"
-
-    # ---- Bandwidth ---------------------------------------------------------
-
-    @staticmethod
-    def bandwidth_table(
-        results: Results,
-        transport: str,
-        msg_size: int,
-    ) -> str:
-        """Build a Markdown table for bandwidth (MB/s)."""
-        data: dict[str, Stats] = results.get("bandwidth", {}).get(transport, {}).get(msg_size, {})
-        if not data:
-            return f"_No bandwidth data for transport={transport}, size={_fmt_size(msg_size)}_\n"
-
-        rows: list[str] = []
-        header = "| Method | min MB/s | p50 MB/s | p95 MB/s | p99 MB/s | max MB/s |"
-        sep    = "|--------|----------:|---------:|---------:|---------:|---------:|"
-        rows.append(f"### Bandwidth — {transport} — {_fmt_size(msg_size)}\n")
-        rows.append(header)
-        rows.append(sep)
-        for comp in _competitors_ordered(data):
-            s = data[comp]
-            rows.append(
-                f"| {comp} | {s.min:.2f} | {s.p50:.2f} | {s.p95:.2f} | {s.p99:.2f} | {s.max:.2f} |"
             )
         return "\n".join(rows) + "\n"
 
@@ -148,9 +132,8 @@ class MarkdownReporter:
 
         for transport in sorted(transports):
             for metric, method in [
-                ("latency",   cls.latency_table),
-                ("bandwidth", cls.bandwidth_table),
-                ("ops",       cls.ops_table),
+                ("latency", cls.latency_table),
+                ("ops",     cls.ops_table),
             ]:
                 parts: list[str] = [f"# {metric.capitalize()} — {transport}\n"]
                 for ms in sorted(msg_sizes):
@@ -177,7 +160,7 @@ class PlotReporter:
     def _competitor_colors(competitors: list[str]) -> dict[str, Any]:
         return {c: _PALETTE[i % len(_PALETTE)] for i, c in enumerate(competitors)}
 
-    # ---- Bar plot (latency / bandwidth) ------------------------------------
+    # ---- Bar plot (latency) ------------------------------------------------
 
     @classmethod
     def _bar_figure(
@@ -284,19 +267,6 @@ class PlotReporter:
         plt.close(fig)
         print(f"  wrote {path}")
 
-    @classmethod
-    def bandwidth_barplot(
-        cls, results: Results, transport: str, msg_sizes: list[int], output_dir: Path
-    ) -> None:
-        fig = cls._bar_figure(
-            results, "bandwidth", transport, msg_sizes,
-            ylabel="Bandwidth (MB/s)", title="Bandwidth",
-        )
-        path = output_dir / f"bandwidth_{transport}.png"
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        print(f"  wrote {path}")
-
     # ---- Line plot (ops/sec) -----------------------------------------------
 
     @classmethod
@@ -359,5 +329,4 @@ class PlotReporter:
 
         for transport in sorted(transports):
             cls.latency_barplot(results, transport, msg_sizes, output_dir)
-            cls.bandwidth_barplot(results, transport, msg_sizes, output_dir)
             cls.ops_lineplot(results, transport, msg_sizes, output_dir)

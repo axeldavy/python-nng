@@ -48,13 +48,19 @@ from benchmarks.reporting import MarkdownReporter, PlotReporter
 
 _ALL_COMPETITORS = [
     "c_nng",
-    "nng_sync",
-    "nng_async",
-    "nng_async_old",
+    "nng_sync1",
+    "nng_sync2",
+    "nng_async1",
+    "nng_async2",
+    "nng_async3",
+    "nng_async4",
+    "nng_async5",
+    "nng_async6",
     "zmq_sync",
     "zmq_async",
     "pynng_sync",
     "pynng_async",
+    "python_raw",
 ]
 _ALL_TRANSPORTS = list(TRANSPORTS.keys())
 

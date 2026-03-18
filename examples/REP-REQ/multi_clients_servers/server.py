@@ -24,10 +24,12 @@ LOG_DATEFMT = "%H:%M:%S"
 
 
 def _log(tag: str, msg: str) -> None:
+    """Helper for consistent log formatting across servers and clients."""
     logging.info("[pid=%-7d  %-16s] %s", os.getpid(), tag, msg)
 
 
 def run(server_id: int, url: str) -> None:
+    """Start a REP server that listens for requests and sends acknowledgements."""
     tag = f"SERVER-{server_id}"
     _log(tag, f"starting — listening on {url}")
 
@@ -36,14 +38,16 @@ def run(server_id: int, url: str) -> None:
         # all finished; exit cleanly rather than waiting forever.
         rep.recv_timeout = 30_000
 
+        # Start accepting client connections in the background.
         lst = rep.add_listener(url)
         lst.start()
         _log(tag, "listener bound — ready for requests")
 
+        # Serve requests until the socket is closed or the recv timeout fires.
         count = 0
         while True:
             try:
-                data = rep.recv()
+                request = rep.recv()
             except nng.NngClosed:
                 _log(tag, "socket closed — shutting down")
                 break
@@ -51,28 +55,29 @@ def run(server_id: int, url: str) -> None:
                 _log(tag, "recv timed out — no more clients, shutting down")
                 break
 
+            # Log the request
             count += 1
-            request = data.decode()
-            _log(tag, f"recv #{count:>3d}  ← {request!r}")
+            _log(tag, f"recv #{count:>3d}  <= '{request}'")
 
+            # Reply with an acknowledgement.
             reply = f"ack from server-{server_id}: [{request}]"
-            rep.send(reply.encode())
-            _log(tag, f"sent #{count:>3d}  → {reply!r}")
+            rep.send(reply)
+            _log(tag, f"sent #{count:>3d}  => '{reply}'")
 
     _log(tag, f"done — served {count} request(s)")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--id", type=int, default=0, help="Server index (for logging)")
-    p.add_argument("--url", required=True, help="Address to listen on")
-    return p.parse_args()
-
-
 if __name__ == "__main__":
-    args = _parse_args()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--id", type=int, default=0, help="Server index (for logging)")
+    parser.add_argument("--url", required=True, help="Address to listen on")
+    args = parser.parse_args()
+
+    # Configure logging to include timestamps and process IDs
     logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt=LOG_DATEFMT)
+
+    # Run the server with the specified ID and URL.
     run(args.id, args.url)

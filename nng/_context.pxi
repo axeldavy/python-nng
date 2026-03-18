@@ -19,6 +19,7 @@ cdef class Context:
     """
 
     cdef shared_ptr[ContextHandle] _handle
+    cdef object __weakref__
 
     def __cinit__(self):
         check_nng_init()
@@ -26,11 +27,6 @@ cdef class Context:
 
     def __init__(self):
         raise RuntimeError("Context cannot be instantiated directly. Use Socket.open_context() instead.")
-
-    # __dealloc__ intentionally omitted: shared_ptr[ContextHandle] destructor
-    # calls ContextHandle::~ContextHandle() -> nng_ctx_close() when refcount hits 0.
-    # AioHandle holds a copy of this shared_ptr while a context-level async
-    # operation is in flight, ensuring the context outlives the operation.
 
     @staticmethod
     cdef Context create(shared_ptr[ContextHandle] ch):
@@ -64,81 +60,74 @@ cdef class Context:
 
     # ── Synchronous send / recv ────────────────────────────────────────────
 
-    def send_msg(self, Message msg, *, bint nonblock = False) -> None:
+    def send(self, data, *, bint nonblock = False) -> None:
         """Send a Message through this context (transfers ownership)."""
         self._check()
 
-        # Steal the message pointer from the Message object, transferring ownership to nng.
-        cdef nng_msg *ptr = msg._steal_ptr()
+        # Build the nng message
+        cdef bint message_is_copy = False
+        cdef nng_msg *ptr = NULL
+        if not isinstance(data, Message):
+            check_err(nng_msg_from_data(data, &ptr))
+            message_is_copy = True
+        else:
+            ptr = (<Message>data)._steal_ptr()
 
         # Send message
+        cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
         cdef int rv
         with nogil:
-            rv = nng_ctx_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK if nonblock else 0)
+            rv = nng_ctx_sendmsg(self._handle.get().raw(), ptr, flags)
 
-        # Handle failure
+        # Raise on errors and restore/free message
         if rv != 0:
-            msg._handle.restore(ptr)
+            if message_is_copy:
+                # nng did not take ownership; free the internally created copy.
+                nng_msg_free(ptr)
+            else:
+                # nng did not take ownership; restore it to the Python wrapper.
+                (<Message>data)._handle.restore(ptr)
             check_err(rv)
 
-    def recv_msg(self, *, bint nonblock = False) -> Message:
+    def recv(self, *, bint nonblock = False) -> Message:
         """Receive a Message through this context."""
         self._check()
 
-        # Receive any message
+        # Receive incoming message
         cdef nng_msg *ptr = NULL
+        cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
         cdef int rv
         with nogil:
-            rv = nng_ctx_recvmsg(self._handle.get().raw(), &ptr, NNG_FLAG_NONBLOCK if nonblock else 0)
+            rv = nng_ctx_recvmsg(self._handle.get().raw(), &ptr, flags)
 
-        # Handle failure
+        # Raise on error
         check_err(rv)
 
         # Return result
         return Message._from_ptr(ptr)
 
-    def send(self, data, *, bint nonblock = False) -> None:
-        """Send raw bytes through this context."""
-        self.send_msg(Message(data), nonblock=nonblock)
-
-    def recv(self, *, bint nonblock = False) -> bytes:
-        """Receive bytes through this context."""
-        return self.recv_msg(nonblock=nonblock).to_bytes()
 
     # ── Async send / recv ─────────────────────────────────────────────────
 
-    async def asend_msg(self, Message msg) -> None:
+    async def asend(self, data) -> None:
         """Send a Message asynchronously through this context."""
         self._check()
 
-        # See socket asend() for explanation
-        """
-        cdef nng_msg *ptr = msg._steal_ptr()
+        # See socket asend() for why we cannot try to send
+        # with NONBLOCK first and fall back to the async machinery on EAGAIN.
 
-        # Fast path: non-blocking send uses a NULL-callback stack aio inside
-        # nng — no task-pool dispatch, no cross-thread wakeups (~200–500 ns).
-        cdef int rv
-        with nogil:
-            rv = nng_ctx_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK)
-
-        # On success the message is sent and we are done.
-        if rv == NNG_OK:
-            return
-
-        # On EAGAIN the message was not sent but we still own it; we can proceed to the slow path.
-        # On any other error the message was not sent; restore ownership to the caller's Message
-        # object before raising.
-        if rv != NNG_EAGAIN:
-            msg._handle.restore(ptr)
-            check_err(rv)
-
-        # Slow path: re-wrap the ptr (nng did not take it on EAGAIN).
-        msg = Message._from_ptr(ptr)
-        """
-
+        # Create an aio request
         cdef _AioOp op = _AioOp.create_for_context(self._handle)
-        op.set_payload(msg)
-        op.set_msg(msg._steal_ptr())
+
+        # Build the nng message
+        cdef nng_msg *ptr = NULL
+        if not isinstance(data, Message):
+            check_err(nng_msg_from_data(data, &ptr))
+        else:
+            ptr = (<Message>data)._steal_ptr()
+
+        # Transfer message ownership
+        op.set_msg(ptr)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
@@ -155,7 +144,7 @@ cdef class Context:
         finally:
             op.ensure_finish()
 
-    async def arecv_msg(self):
+    async def arecv(self):
         """Receive a Message asynchronously through this context."""
         self._check()
 
@@ -166,7 +155,7 @@ cdef class Context:
         with nogil:
             rv = nng_ctx_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
 
-        # On success the message is received and we can convert it to bytes and return.
+        # On success the message is received and we can return.
         if rv == NNG_OK:
             return Message._from_ptr(msg)
 
@@ -197,20 +186,68 @@ cdef class Context:
         cdef nng_msg *ptr = op.get_msg()
         if ptr == NULL:
             raise NngError(NNG_EINTERNAL, "No message in AIO after recv")
+
+        # Take ownership of the message and return it
         return Message._from_ptr(ptr)
 
-    async def asend(self, data) -> None:
-        """Send bytes asynchronously through this context."""
-        await self.asend_msg(Message(data))
 
-    async def arecv(self) -> bytes:
-        """Receive bytes asynchronously through this context."""
-        return (await self.arecv_msg()).to_bytes()
+    # ── concurrent.futures submit helpers ─────────────────────────────────
+
+    def submit_send(self, data) -> _concurrent_futures.Future:
+        """Send *data* (bytes-like) asynchronously; return a concurrent.futures.Future.
+
+        The future resolves to ``None`` on success or raises an :exc:`NngError`
+        on failure.  Can be called from any thread without a running event loop.
+        """
+        self._check()
+
+        # Create an aio request
+        cdef _AioOp op = _AioOp.create_for_context_concurrent(self._handle, False)
+
+        # Build the nng message
+        cdef nng_msg *ptr = NULL
+        if not isinstance(data, Message):
+            check_err(nng_msg_from_data(data, &ptr))
+        else:
+            ptr = (<Message>data)._steal_ptr()
+
+        # Transfer message ownership
+        op.set_msg(ptr)
+
+        # Fetch the future now as get_future is invalid after submission
+        fut = op.get_future()
+
+        # Submit the operation
+        op.submit_ctx_send(self._handle.get().raw())
+
+        # Return the concurrent.futures.Future to the caller
+        return fut
+
+    def submit_recv(self) -> _concurrent_futures.Future:
+        """Receive asynchronously; return a concurrent.futures.Future → bytes.
+
+        The future resolves to the received payload as ``bytes``.
+        Can be called from any thread without a running event loop.
+        """
+        self._check()
+
+        # Create an aio request
+        cdef _AioOp op = _AioOp.create_for_context_concurrent(self._handle, True)
+
+        # Fetch the future now as get_future is invalid after submission
+        fut = op.get_future()
+
+        # Submit the operation
+        op.submit_ctx_recv(self._handle.get().raw())
+
+        # Return the concurrent.futures.Future to the caller
+        return fut
 
     # ── Options ───────────────────────────────────────────────────────────
 
     @property
     def recv_timeout(self) -> int:
+        """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
         self._check()
         cdef nng_duration v
         check_err(nng_ctx_get_ms(self._handle.get().raw(), b"recv-timeout", &v))
@@ -223,6 +260,7 @@ cdef class Context:
 
     @property
     def send_timeout(self) -> int:
+        """Send timeout in ms."""
         self._check()
         cdef nng_duration v
         check_err(nng_ctx_get_ms(self._handle.get().raw(), b"send-timeout", &v))
@@ -236,3 +274,34 @@ cdef class Context:
     def __repr__(self) -> str:
         cdef bint is_open = self._handle.get() != NULL and self._handle.get().is_open()
         return f"Context(id={nng_ctx_id(self._handle.get().raw()) if is_open else 0}, open={is_open})"
+
+cdef class SubContext(Context):
+    """Independent sub context on a :class:`SubSocket`.
+
+    Sub contexts have an independant subscription state as their
+    parent socket. They thus can be used to implement multiple logical
+    subscribers sharing the same underlying socket.
+    """
+    def subscribe(self, prefix: bytes = b"") -> None:
+        """Subscribe to messages whose body starts with *prefix*.
+
+        An empty prefix subscribes to all messages.
+        """
+        self._check()
+        cdef const unsigned char[::1] mv = prefix
+        check_err(nng_sub0_ctx_subscribe(
+            self._handle.get().raw(),
+            &mv[0] if len(mv) else NULL, len(mv))
+        )
+
+    def unsubscribe(self, prefix: bytes = b"") -> None:
+        """Unsubscribe from messages whose body starts with *prefix*.
+
+        An empty prefix unsubscribes from all messages.
+        """
+        self._check()
+        cdef const unsigned char[::1] mv = prefix
+        check_err(nng_sub0_ctx_unsubscribe(
+            self._handle.get().raw(),
+            &mv[0] if len(mv) else NULL, len(mv))
+        )

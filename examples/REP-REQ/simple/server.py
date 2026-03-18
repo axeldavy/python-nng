@@ -12,26 +12,28 @@ import nng
 URL = "tcp://127.0.0.1:54321"
 NUM_REQUESTS = 5
 
+# NOTE: we use submit_recv()/submit_send() here instead of
+# recv()/send(), as blocking recv/send cannot be Ctrl-C.
+# They should be reserved for daemon threads.
 
 def main() -> None:
     print(f"Server listening on {URL}  (expecting {NUM_REQUESTS} request(s))\n")
 
     with nng.RepSocket() as rep:
+        # Start accepting clients
         rep.add_listener(URL).start()
 
         for i in range(1, NUM_REQUESTS + 1):
             # Block until a request arrives.
-            data = rep.recv()
-            request = data.decode()
-            print(f"  recv [{i}/{NUM_REQUESTS}]  ← {request!r}")
+            request = rep.submit_recv().result()
+            print(f"  recv [{i}/{NUM_REQUESTS}]  <= '{request}'")
 
             # The REP protocol requires exactly one send per recv.
             reply = f"echo: {request}"
-            rep.send(reply.encode())
-            print(f"  sent [{i}/{NUM_REQUESTS}]  → {reply!r}")
+            rep.submit_send(reply)
+            print(f"  sent [{i}/{NUM_REQUESTS}]  => '{reply}'")
 
-    print("\nServer done.")
-
+    print("\nServer done.\n")
 
 if __name__ == "__main__":
     main()

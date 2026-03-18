@@ -1,12 +1,14 @@
 // nng/cpp/message.hpp
-// RAII wrapper for nng_msg*. No Python headers included.
-// C++20. Moveable, non-copyable. Owns the message unless steal() is called.
+// RAII wrapper for nng_msg* and non-owning pipe handle. No Python headers included.
+// C++20. MessageHandle: moveable, non-copyable, owns the message unless steal() is called.
+// PipeHandle: non-owning thin wrapper around nng_pipe.
 //
-// All nng_msg operations are exposed as inline methods so Cython code never
-// needs to call .get() to reach the raw pointer.
+// All nng_msg / nng_pipe operations are exposed as inline methods so Cython
+// code never needs to call .get() to reach the raw handle.
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <nng/nng.h>
 
 namespace nng_cpp {
@@ -50,6 +52,7 @@ public:
     void*       body_ptr() const noexcept { return nng_msg_body(_msg); }
     void        clear()          noexcept { nng_msg_clear(_msg); }
     int  reserve(std::size_t n)  noexcept { return nng_msg_reserve(_msg, n); }
+    int  resize(std::size_t n)   noexcept { return nng_msg_realloc(_msg, n); }
     int  append(const void* data, std::size_t len) noexcept { return nng_msg_append(_msg, data, len); }
     int  insert(const void* data, std::size_t len) noexcept { return nng_msg_insert(_msg, data, len); }
     int  trim(std::size_t n)     noexcept { return nng_msg_trim(_msg, n); }
@@ -91,6 +94,19 @@ public:
 
     nng_pipe get_pipe() const noexcept { return nng_msg_get_pipe(_msg); }
 
+    // ── Equality ──────────────────────────────────────────────────────────
+
+    // Two handles are equal when both are empty, or when they hold the exact
+    // same number of body bytes and those bytes compare equal (memcmp).
+    bool operator==(const MessageHandle& o) const noexcept {
+        if (_msg == o._msg) return true;
+        if (!_msg || !o._msg) return false;
+        const std::size_t len = body_len();
+        if (len != o.body_len()) return false;
+        return std::memcmp(body_ptr(), o.body_ptr(), len) == 0;
+    }
+    bool operator!=(const MessageHandle& o) const noexcept { return !(*this == o); }
+
     // ── Static factories ─────────────────────────────────────────────────
 
     // Allocate an empty message (or one pre-sized with zeroes).
@@ -107,11 +123,10 @@ public:
     static MessageHandle alloc_with_data(
             const void* data, std::size_t len, int& err) noexcept {
         nng_msg* ptr = nullptr;
-        err = nng_msg_alloc(&ptr, 0);
+        err = nng_msg_alloc(&ptr, len);
         if (err != 0) return MessageHandle{};
         if (len > 0) {
-            err = nng_msg_append(ptr, data, len);
-            if (err != 0) { nng_msg_free(ptr); return MessageHandle{}; }
+            memcpy(nng_msg_body(ptr), data, len);
         }
         return MessageHandle{ptr};
     }

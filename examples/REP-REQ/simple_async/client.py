@@ -8,16 +8,15 @@ you must receive a reply before sending the next request.
     python client.py
 """
 
+import asyncio
 import nng
 
 URL = "tcp://127.0.0.1:54321"
 NUM_REQUESTS = 5
 
-# NOTE: we use submit_recv()/submit_send() here instead of
-# recv()/send(), as blocking recv/send cannot be Ctrl-C.
-# recv/send should be reserved for daemon threads.
 
 def main() -> None:
+    """Start a simple REQ client that sends NUM_REQUESTS messages to the server"""
     print(f"Client connecting to {URL}\n")
 
     with nng.ReqSocket() as req:
@@ -25,15 +24,20 @@ def main() -> None:
         req.add_dialer(URL).start(block=True)
         print("Connected.\n")
 
-        for i in range(1, NUM_REQUESTS + 1):
-            # Prepare and send request
-            msg = f"request-{i}"
-            print(f"  send [{i}/{NUM_REQUESTS}]  => '{msg}'")
-            req.submit_send(msg)
+        # Prepare an async task to run the conversation.
+        async def conversation():
+            # Send NUM_REQUESTS messages
+            for i in range(1, NUM_REQUESTS + 1):
+                # Prepare and send request
+                msg = f"request-{i}"
+                print(f"  send [{i}/{NUM_REQUESTS}]  => '{msg}'")
+                await req.asend(msg)
 
-            # Receive and handle reply
-            reply = req.submit_recv().result()
-            print(f"  recv [{i}/{NUM_REQUESTS}]  <= '{reply}'")
+                # Receive and handle reply
+                reply = await req.arecv()
+                print(f"  recv [{i}/{NUM_REQUESTS}]  <= '{reply}'")
+
+        asyncio.run(conversation())
 
     print("\nClient done.")
 
