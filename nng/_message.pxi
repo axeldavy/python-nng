@@ -476,10 +476,7 @@ cdef class Message:
         sock = _socket_registry.get(nng_socket_id(nng_pipe_socket(p)))
         if sock is None:
             return None
-        for pipe in sock._pipes:
-            if pipe.id == p.id:
-                return pipe
-        return None
+        return (<Socket>sock).get_pipe(p.id)
 
     def __eq__(self, other) -> bool:
         """True when both messages have identical body bytes (memcmp)."""

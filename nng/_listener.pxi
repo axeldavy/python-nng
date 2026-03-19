@@ -158,5 +158,8 @@ cdef class Listener:
             rv = NNG_ECLOSED
         check_err(rv)
 
+        # to get pipes visible faster.
+        _drain_pipe_events()
+
     def __repr__(self) -> str:
         return f"Listener(id={self._handle.id() if self._handle.is_open() else 0})"

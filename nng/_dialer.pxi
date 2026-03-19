@@ -216,6 +216,9 @@ cdef class Dialer:
             rv = NNG_ECLOSED
         check_err(rv)
 
+        # Help ensure the pipe is visible after a blocking start
+        _drain_pipe_events()
+
     def __repr__(self) -> str:
         return f"Dialer(id={self._handle.id() if self._handle.is_open() else 0})"
 

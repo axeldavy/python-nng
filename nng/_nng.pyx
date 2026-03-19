@@ -93,21 +93,43 @@ from traceback import print_exc as _print_exc
 cdef int _nng_initialized = 0
 cdef object _nng_init_lock = _threading.Lock()
 
-# ── AIO dispatch queue ────────────────────────────────────────────────────────
-# Allocated at module import; always valid.  The nng callback thread calls
-# push() (GIL-free).  The dispatcher thread drains via get_ready/wait_for.
-cdef DispatchQueue* _dispatch_queue = new DispatchQueue()
-
 # ── Pipe event queue ──────────────────────────────────────────────────────────
 # GIL-free queue for pipe lifecycle events.  The nng callback thread pushes
 # (pipe_id, ev) pairs; the dispatcher thread drains them after being woken
 # by a sentinel 0 push into _dispatch_queue.
 cdef PipeEventQueue* _pipe_event_queue = new PipeEventQueue()
+cdef DCGMutex _pipe_event_mutex
 
 # Weak registry: int(socket_id) → Socket.  Populated at socket creation;
 # entries vanish automatically when the Socket is garbage-collected.
 import weakref as _weakref
 _socket_registry = _weakref.WeakValueDictionary()
+
+cdef void _drain_pipe_events():
+    """
+    Drain all pending pipe events from _pipe_event_queue.
+
+    Can be called from any thread
+    """
+    cdef unique_lock[DCGMutex] lock
+    cdef uint32_t psid = 0
+    cdef uint32_t ppid = 0
+    cdef int pev = 0
+
+    # Ensure only one thread dispatches pipe events at a time
+    lock_gil_friendly(lock, _pipe_event_mutex)
+
+    cdef bint pgot = _pipe_event_queue.get_ready(psid, ppid, pev)
+    while pgot:
+        _dispatch_pipe_event(psid, ppid, pev)
+        pgot = _pipe_event_queue.get_ready(psid, ppid, pev)
+
+
+# ── AIO dispatch queue ────────────────────────────────────────────────────────
+# Allocated at module import; always valid.  The nng callback thread calls
+# push() (GIL-free).  The dispatcher thread drains via get_ready/wait_for.
+cdef DispatchQueue* _dispatch_queue = new DispatchQueue()
+
 
 # Maps id(op) -> op._dispatch_complete bound method.
 # Written under the GIL before submit; read and erased under the GIL in the
@@ -243,10 +265,7 @@ def _aio_dispatch_loop():
             got = _dispatch_queue.get_ready(op_id)
 
         # 2. Drain all pending pipe events.
-        pgot = _pipe_event_queue.get_ready(psid, ppid, pev)
-        while pgot:
-            _dispatch_pipe_event(psid, ppid, pev)
-            pgot = _pipe_event_queue.get_ready(psid, ppid, pev)
+        _drain_pipe_events()
 
         # 3. Check stop conditions before blocking.
         if _dispatch_queue.is_stopped():

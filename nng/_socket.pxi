@@ -325,33 +325,49 @@ cdef class Socket:
         copied out under the mutex then called without the mutex held to prevent
         deadlock if the callback re-enters socket methods.
         """
+        # Create the pipe
         cdef Pipe pipe = Pipe._from_nng(p)
-        cdef int pid = pipe.id
-        cdef object cb
+
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
+        # Add pipe to list and retrieve callback
         self._pipes.append(pipe)
+
+        # Set status
+        cdef int pid = pipe.id
         self._pipe_statuses[pid] = PipeStatus.ADDING
-        cb = self._on_new_pipe_cb
+
+        # Retrieve callback
+        cdef object cb = self._on_new_pipe_cb
+
+        # Release lock before calling the callback
         lock.unlock()
+
+        # Call the callback with pipe
         if cb is not None:
             try:
                 cb(pipe)
-            except BaseException:
+            except Exception:
                 _print_exc()
 
     cdef void promote_pipe(self, uint32_t pid):
         """Transition pipe *pid* from ADDING → ACTIVE and fire its callback."""
-        cdef object cb
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
+        # Set pipe status and retrieve pipe callback
         self._pipe_statuses[<int>pid] = PipeStatus.ACTIVE
-        cb = self._pipe_cbs_table.get(<int>pid)
+        cdef object cb = self._pipe_cbs_table.get(<int>pid)
+
+        # Release lock before calling the callback
         lock.unlock()
+
+        # Call the pipe callback
         if cb is not None:
             try:
                 cb()
-            except BaseException:
+            except Exception:
                 _print_exc()
 
     cdef void remove_pipe(self, uint32_t pid):
@@ -361,20 +377,29 @@ cdef class Socket:
         REMOVED status) so the callback can inspect *socket.pipes*.
         After the callback returns the pipe is removed from all tracking tables.
         """
-        cdef object cb
         cdef int i
+
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
+        # Set status to REMOVED and retrieve callback
         self._pipe_statuses[<int>pid] = PipeStatus.REMOVED
-        cb = self._pipe_cbs_table.get(<int>pid)
+        cdef object cb = self._pipe_cbs_table.get(<int>pid)
+
+        # Release lock before calling the callback
         lock.unlock()
+
+        # Call the callback
         if cb is not None:
             try:
                 cb()
-            except BaseException:
+            except Exception:
                 _print_exc()
-        # Remove from tracking tables after callback has returned.
+
+        # Lock again
         lock_gil_friendly(lock, self._pipe_mutex)
+
+        # Remove from tracking tables after callback has returned.
         for i in range(len(self._pipes)):
             if (<Pipe>self._pipes[i])._handle.get_id() == <int>pid:
                 del self._pipes[i]
@@ -382,16 +407,28 @@ cdef class Socket:
         self._pipe_statuses.pop(<int>pid, None)
         self._pipe_cbs_table.pop(<int>pid, None)
 
+    cdef object get_pipe(self, int pid):
+        """Return the Pipe object for *pid*, or ``None`` if unknown."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+
+        for i in range(len(self._pipes)):
+            if (<Pipe>self._pipes[i])._handle.get_id() == <int>pid:
+                return self._pipes[i]
+        return None
+
     cdef object get_pipe_status(self, int pid):
         """Return the current :class:`PipeStatus` for *pid* (REMOVED if unknown)."""
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
         return self._pipe_statuses.get(pid, PipeStatus.REMOVED)
 
     cdef void set_pipe_cb(self, int pid, object cb):
         """Register or clear the on_status_change callback for *pid*."""
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
         if cb is None:
             self._pipe_cbs_table.pop(pid, None)
         else:
@@ -401,6 +438,7 @@ cdef class Socket:
         """Return the on_status_change callback for *pid*, or ``None``."""
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
         return self._pipe_cbs_table.get(pid)
 
     cdef inline void _check(self) except *:
