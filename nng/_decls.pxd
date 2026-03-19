@@ -282,8 +282,9 @@ cdef extern from "nng/nng.h":
     size_t  nng_aio_count  (nng_aio *)         nogil
     void    nng_aio_cancel (nng_aio *)         nogil
     void    nng_aio_abort  (nng_aio *, nng_err) nogil
-    void    nng_aio_wait   (nng_aio *)         nogil
-    bint    nng_aio_busy   (nng_aio *)         nogil
+    void    nng_aio_wait        (nng_aio *)              nogil
+    bint    nng_aio_wait_until  (nng_aio *, nng_time)    nogil
+    bint    nng_aio_busy        (nng_aio *)              nogil
     void    nng_aio_set_msg(nng_aio *, nng_msg *) nogil
     nng_msg *nng_aio_get_msg(nng_aio *)        nogil
     int     nng_aio_set_input (nng_aio *, unsigned int, void *) nogil

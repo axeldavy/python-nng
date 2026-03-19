@@ -1,12 +1,7 @@
 """Benchmark competitor: python-nng synchronous REQ/REP via send/recv.
 
 Blocking send/recv are the fastest way to send/receive messages.
-Indeed they have the least overhead as they avoid the additional future/promise machinery,
-and the use of internal nng threads for async submission and completion.
-
-However be aware that when blocking, Python signals are not handled until the blocking call
-returns. For that reason, prefer the alternatives, or use with care in a dedicated thread.
-You can stop a blocking recv/send by closing the socket from another thread.
+Indeed they have the least overhead as they avoid the additional future/promise machinery.
 """
 
 from __future__ import annotations

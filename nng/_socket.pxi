@@ -753,17 +753,13 @@ cdef class Socket:
 
     def send(self, data, *, bint nonblock=False) -> None:
         """Send an :class:`Message`.  Transfers ownership on success.
-        
+
         Parameters
         ----------
-        msg:
-            The :class:`Message` to send.
+        data:
+            The :class:`Message` (or bytes-like) to send.
         nonblock:
-            If *True* raise :exc:`NngAgain` instead of blocking.
-
-        NOTE: Signals such as KeyBoardInterrupt (Ctrl-C) are not handled
-        during this function. Thus avoid blocking calls on the main thread.
-        Use submit_send().result() for a blocking call that handles Ctrl-C.
+            If *True*, raise :exc:`NngAgain` instead of blocking.
         """
         self._check()
 
@@ -776,48 +772,153 @@ cdef class Socket:
         else:
             ptr = (<Message>data)._steal_ptr()
 
-        # Send message
-        cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
+        # Fast path: non-blocking send delegates to nng_sendmsg directly.
         cdef int rv
-        with nogil:
-            rv = nng_sendmsg(self._handle.get().raw(), ptr, flags)
+        if nonblock:
+            with nogil:
+                rv = nng_sendmsg(self._handle.get().raw(), ptr, NNG_FLAG_NONBLOCK)
+            if rv != 0:
+                if message_is_copy:
+                    nng_msg_free(ptr)
+                else:
+                    (<Message>data)._handle.restore(ptr)
+                check_err(rv)
+            return
 
-        # Raise on errors and restore/free message
-        if rv != 0:
-            if message_is_copy:
-                # nng did not take ownership; free the internally created copy.
-                nng_msg_free(ptr)
-            else:
-                # nng did not take ownership; restore it to the Python wrapper.
-                (<Message>data)._handle.restore(ptr)
+        # Blocking path: use an AIO and poll every 100 ms so that
+        # Python signals (Ctrl-C) are processed between polls.
+        cdef bint still_busy
+
+        # Allocate aio
+        cdef nng_aio *aio = NULL
+        check_err(nng_aio_alloc(&aio, NULL, NULL))
+
+        try:
+            # Configure aio
+            nng_aio_set_timeout(aio, NNG_DURATION_DEFAULT)
+            nng_aio_set_msg(aio, ptr)
+
+            # Submit the send and do the first wait
+            with nogil:
+                nng_socket_send(self._handle.get().raw(), aio)
+                still_busy = nng_aio_wait_until(aio, nng_clock() + 100)
+
+            # If the aio completed, return
+            if not still_busy:
+                rv = nng_aio_result(aio)
+                if rv != 0:
+                    if message_is_copy:
+                        nng_msg_free(ptr)
+                    else:
+                        (<Message>data)._handle.restore(ptr)
+                    check_err(rv)
+                return
+
+            # Wait with periodic signal checks; cancels AIO on Ctrl-C and raises.
+            try:
+                while still_busy:
+                    PyErr_CheckSignals()
+                    with nogil:
+                        still_busy = nng_aio_wait_until(aio, nng_clock() + 100)
+            except BaseException:
+                # We cancel and ensure completion to have valid aio result to check.
+                # the wait should be fast since we are cancelling.
+                if nng_aio_busy(aio):
+                    nng_aio_cancel(aio)
+                    nng_aio_wait(aio)
+                raise
+            finally:
+                rv = nng_aio_result(aio)
+                # nng only consumes the message on success.
+                if rv != 0:
+                    if message_is_copy:
+                        nng_msg_free(ptr)
+                    else:
+                        (<Message>data)._handle.restore(ptr)
+
+            # Raise if the send failed;
             check_err(rv)
+        finally:
+            nng_aio_free(aio)
 
     def recv(self, *, bint nonblock=False) -> Message:
-        """Receive and return an :class:`Message` (zero-copy via buffer protocol).
-        
+        """Receive and return a :class:`Message` (zero-copy via buffer protocol).
+
         Parameters
         ----------
         nonblock:
-            If *True* raise :exc:`NngAgain` if no message is ready.
-
-        NOTE: Signals such as KeyBoardInterrupt (Ctrl-C) are not handled
-        during this function. Thus avoid blocking calls on the main thread.
-        Use submit_recv().result() for a blocking call that handles Ctrl-C.
+            If *True*, raise :exc:`NngAgain` if no message is ready.
         """
         self._check()
 
-        # Receive incoming message
-        cdef nng_msg *ptr = NULL
-        cdef int flags = NNG_FLAG_NONBLOCK if nonblock else 0
+        # Fast path: non-blocking recv delegates to nng_recvmsg directly.
         cdef int rv
-        with nogil:
-            rv = nng_recvmsg(self._handle.get().raw(), &ptr, flags)
+        cdef nng_msg *ptr = NULL
+        if nonblock:
+            with nogil:
+                rv = nng_recvmsg(self._handle.get().raw(), &ptr, NNG_FLAG_NONBLOCK)
+            check_err(rv)
+            return Message._from_ptr(ptr)
 
-        # Raise on error
-        check_err(rv)
+        # Blocking path: use an AIO and poll every 100 ms so that
+        # Python signals (Ctrl-C) are processed between polls.
+        cdef bint still_busy
 
-        # Return message
-        return Message._from_ptr(ptr)
+        # allocate aio
+        cdef nng_aio *aio = NULL
+        check_err(nng_aio_alloc(&aio, NULL, NULL))
+        try:
+            nng_aio_set_timeout(aio, NNG_DURATION_DEFAULT)
+
+            # Submit the recv
+            with nogil:
+                nng_socket_recv(self._handle.get().raw(), aio)
+                still_busy = nng_aio_wait_until(aio, nng_clock() + 100)
+
+            # If the aio completed, return
+            if not still_busy:
+                rv = nng_aio_result(aio)
+
+                # Raise on error
+                check_err(rv)
+
+                # Else return the message
+                ptr = nng_aio_get_msg(aio)
+                return Message._from_ptr(ptr)
+
+            # Wait with periodic signal checks; cancels AIO on Ctrl-C and raises.
+            try:
+                while still_busy:
+                    PyErr_CheckSignals()
+                    with nogil:
+                        still_busy = nng_aio_wait_until(aio, nng_clock() + 100)
+            except BaseException:
+                # We cancel and ensure completion to have valid aio result to check.
+                # the wait should be fast since we are cancelling.
+                if nng_aio_busy(aio):
+                    nng_aio_cancel(aio)
+                    nng_aio_wait(aio)
+
+                # If the AIO completed before cancellation, a received message is
+                # owned by us and must be freed (rv == 0 means message is present).
+                rv = nng_aio_result(aio)
+                if rv == 0:
+                    nng_msg_free(nng_aio_get_msg(aio))
+
+                # Now we can safely raise the signal exception.
+                raise
+
+            # If we are here, the AIO completed without Python signals; retrieve the message and return it.
+            rv = nng_aio_result(aio)
+
+            # Raise on error
+            check_err(rv)
+
+            # Else return the message
+            ptr = nng_aio_get_msg(aio)
+            return Message._from_ptr(ptr)
+        finally:
+            nng_aio_free(aio)
 
     # ── Async send / recv ─────────────────────────────────────────────────
 

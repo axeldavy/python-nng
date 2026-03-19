@@ -1,9 +1,8 @@
 """Benchmark competitor: python-nng synchronous REQ/REP via submit_send/submit_recv.
 
-submit_send/submit_recv are the recommended way to do synchronous send/recv with python-nng.
-They are slightly slower than blocking send/recv, but they allow Python signals to be handled while
-waiting for the send/recv to complete, and thus can be used from your main thread without
-risk of freezing the process.
+submit_send/submit_recv are an alternative way to do synchronous send/recv with python-nng.
+They are slightly slower than blocking send/recv, but can be used to wait
+later on completion.
 """
 
 from __future__ import annotations

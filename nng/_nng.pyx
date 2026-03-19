@@ -32,7 +32,7 @@ from libc.string cimport memset, memcpy
 from libcpp cimport bool as cpp_bool
 from libcpp.utility cimport move
 from cpython.buffer cimport PyBUF_FORMAT, Py_buffer
-
+from cpython.exc cimport PyErr_CheckSignals
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 cimport cython
@@ -202,7 +202,6 @@ def _nng_fini():
 
 
 _atexit.register(_nng_fini)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Included implementation sections (order matters for forward references)

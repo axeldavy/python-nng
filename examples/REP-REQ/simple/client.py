@@ -13,10 +13,6 @@ import nng
 URL = "tcp://127.0.0.1:54321"
 NUM_REQUESTS = 5
 
-# NOTE: we use submit_recv()/submit_send() here instead of
-# recv()/send(), as blocking recv/send cannot be Ctrl-C.
-# recv/send should be reserved for daemon threads.
-
 def main() -> None:
     print(f"Client connecting to {URL}\n")
 
@@ -29,10 +25,10 @@ def main() -> None:
             # Prepare and send request
             msg = f"request-{i}"
             print(f"  send [{i}/{NUM_REQUESTS}]  => '{msg}'")
-            req.submit_send(msg)
+            req.send(msg)
 
             # Receive and handle reply
-            reply = req.submit_recv().result()
+            reply = req.recv()
             print(f"  recv [{i}/{NUM_REQUESTS}]  <= '{reply}'")
 
     print("\nClient done.")

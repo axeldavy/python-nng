@@ -12,10 +12,6 @@ import nng
 URL = "tcp://127.0.0.1:54321"
 NUM_REQUESTS = 5
 
-# NOTE: we use submit_recv()/submit_send() here instead of
-# recv()/send(), as blocking recv/send cannot be Ctrl-C.
-# They should be reserved for daemon threads.
-
 def main() -> None:
     print(f"Server listening on {URL}  (expecting {NUM_REQUESTS} request(s))\n")
 
@@ -25,12 +21,12 @@ def main() -> None:
 
         for i in range(1, NUM_REQUESTS + 1):
             # Block until a request arrives.
-            request = rep.submit_recv().result()
+            request = rep.recv()
             print(f"  recv [{i}/{NUM_REQUESTS}]  <= '{request}'")
 
             # The REP protocol requires exactly one send per recv.
             reply = f"echo: {request}"
-            rep.submit_send(reply)
+            rep.send(reply)
             print(f"  sent [{i}/{NUM_REQUESTS}]  => '{reply}'")
 
     print("\nServer done.\n")
