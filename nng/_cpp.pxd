@@ -6,24 +6,16 @@
 #   shared_ptr / make_shared  – SocketHandle only (shared with child objects).
 #   unique_ptr / make_unique   – all other handles (single owner).
 
+from libcpp cimport bool as cpp_bool
 from libcpp.memory cimport shared_ptr, make_shared, unique_ptr, make_unique
+from libcpp.vector cimport vector
 from nng._decls cimport (
     nng_socket, nng_ctx, nng_dialer, nng_listener,
     nng_msg, nng_aio, nng_tls_config, nng_tls_mode,
-    nng_pipe, nng_duration, nng_sockaddr
+    nng_pipe, nng_pipe_ev, nng_duration, nng_sockaddr
 )
 
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int32_t, int16_t
-
-# ── SocketHandle ─────────────────────────────────────────────────────────────
-
-cdef extern from "nng/cpp/socket.hpp" namespace "nng_cpp" nogil:
-    cppclass SocketHandle:
-        SocketHandle()
-        SocketHandle(nng_socket s)
-        int close()
-        nng_socket raw()
-        bint is_open()
 
 # ── MessageHandle ─────────────────────────────────────────────────────────────
 
@@ -78,7 +70,6 @@ cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
     cppclass PipeHandle:
         PipeHandle()
         PipeHandle(nng_pipe p)
-        nng_pipe     get()
         int          get_id()
         bint         is_valid()
         int          close()
@@ -87,8 +78,29 @@ cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
         nng_socket   get_socket()
         int          peer_addr(nng_sockaddr& sa)
         int          self_addr(nng_sockaddr& sa)
+        int          get_status()
+        void         set_status(int s)
         bint operator==(const PipeHandle& o)
         bint operator!=(const PipeHandle& o)
+
+    cppclass PipeCollection:
+        PipeCollection()
+        void handle_event(nng_pipe p, nng_pipe_ev ev)
+        vector[shared_ptr[PipeHandle]] get_pipes() const
+        void clear()
+        cpp_bool had_events()
+
+
+# ── SocketHandle ─────────────────────────────────────────────────────────────
+
+cdef extern from "nng/cpp/socket.hpp" namespace "nng_cpp" nogil:
+    cppclass SocketHandle:
+        SocketHandle()
+        SocketHandle(nng_socket s)
+        int        close()
+        nng_socket raw()
+        bint       is_open()
+        PipeCollection*        pipe_collection()
 
 # ── TlsConfigHandle ───────────────────────────────────────────────────────────
 
@@ -176,12 +188,3 @@ cdef extern from "nng/cpp/dispatch.hpp" namespace "nng_cpp" nogil:
         void stop()
         bint is_stopped()
 
-# ── PipeEventQueue ─────────────────────────────────────────────────────────────
-
-cdef extern from "nng/cpp/pipe_notif.hpp" namespace "nng_cpp" nogil:
-    cppclass PipeEventQueue:
-        PipeEventQueue()
-        void push(uint32_t sock_id, uint32_t pipe_id, int ev)
-        bint get_ready(uint32_t& sock_id, uint32_t& pipe_id, int& ev)
-        void stop()
-        bint is_stopped()

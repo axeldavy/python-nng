@@ -68,11 +68,6 @@ from nng._nng import (
     NngAuthError,
     NngCryptoError,
 
-    # ── Pipe event constants (kept for backward compatibility) ──────────────
-    PIPE_EV_ADD_PRE,
-    PIPE_EV_ADD_POST,
-    PIPE_EV_REM_POST,
-
     # ── TLS constants ─────────────────────────────────────────────────────
     TLS_AUTH_NONE,
     TLS_AUTH_OPTIONAL,

@@ -43,6 +43,7 @@ cdef class Dialer:
     """
 
     cdef DialerHandle _handle
+    cdef object _weak_socket_ref  # weakref to parent Socket to avoid ref cycles
 
     cdef object __weakref__
 
@@ -51,10 +52,11 @@ cdef class Dialer:
         # _handle default-constructed (empty) by Cython's C++ member glue.
 
     @staticmethod
-    cdef Dialer create(DialerHandle dh):
+    cdef Dialer create(DialerHandle dh, Socket sock):
         """Take ownership of an already-created DialerHandle."""
         cdef Dialer dialer = Dialer.__new__(Dialer)
         dialer._handle = move(dh)
+        dialer._weak_socket_ref = _weakref(sock)
         return dialer
 
     cdef inline void _check(self) except *:
@@ -81,6 +83,27 @@ cdef class Dialer:
     def id(self) -> int:
         """The numeric dialer ID, or 0 if the dialer has been closed."""
         return self._handle.id()
+
+    @property
+    def pipe(self) -> Pipe:
+        """The active :class:`Pipe` for this dialer, or ``None`` if not connected."""
+        self._check()
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is None:
+            raise NngClosed(NNG_ECLOSED, "Parent socket has been closed")
+        pipes = sock.pipes
+        for p in pipes:
+            if p.dialer is self:
+                return p
+        return None
+
+    @property
+    def socket(self) -> Socket:
+        """The parent :class:`Socket` for this dialer."""
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is None:
+            raise NngClosed(NNG_ECLOSED, "Parent socket has been closed")
+        return sock
 
     # ── Options (read-only; set via Socket.add_dialer) ────────────────────
 
@@ -216,8 +239,10 @@ cdef class Dialer:
             rv = NNG_ECLOSED
         check_err(rv)
 
-        # Help ensure the pipe is visible after a blocking start
-        _drain_pipe_events()
+        # Ensure the pipe creation callback spawns right after a blocking start
+        cdef Socket sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is not None:
+            sock.update_pipes()
 
     def __repr__(self) -> str:
         return f"Dialer(id={self._handle.id() if self._handle.is_open() else 0})"

@@ -42,6 +42,7 @@ cdef class Listener:
     """
 
     cdef ListenerHandle _handle
+    cdef object _weak_socket_ref  # weakref to parent Socket to avoid ref cycles
 
     cdef object __weakref__
 
@@ -50,10 +51,11 @@ cdef class Listener:
         # _handle default-constructed (empty) by Cython's C++ member glue.
 
     @staticmethod
-    cdef Listener create(ListenerHandle lh):
+    cdef Listener create(ListenerHandle lh, Socket sock):
         """Take ownership of an already-created ListenerHandle."""
         cdef Listener listener = Listener.__new__(Listener)
         listener._handle = move(lh)
+        listener._weak_socket_ref = _weakref(sock)
         return listener
 
     cdef inline void _check(self) except *:
@@ -80,6 +82,28 @@ cdef class Listener:
     def id(self) -> int:
         """The numeric listener ID, or 0 if the listener has been closed."""
         return self._handle.id()
+
+    @property
+    def pipes(self) -> list[Pipe]:
+        """The active :class:`Pipe`(s) for this listener."""
+        self._check()
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is None:
+            raise NngClosed(NNG_ECLOSED, "Parent socket has been closed")
+        pipes = sock.pipes
+        results = []
+        for p in pipes:
+            if p.listener is self:
+                results.append(p)
+        return results
+
+    @property
+    def socket(self) -> Socket:
+        """The parent :class:`Socket` for this listener."""
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is None:
+            raise NngClosed(NNG_ECLOSED, "Parent socket has been closed")
+        return sock
 
     # ── Options (read-only; set via Socket.add_listener) ────────────────────
 
@@ -158,8 +182,10 @@ cdef class Listener:
             rv = NNG_ECLOSED
         check_err(rv)
 
-        # to get pipes visible faster.
-        _drain_pipe_events()
+        # Not needed but shouldn't hurt.
+        cdef Socket sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is not None:
+            sock.update_pipes()
 
     def __repr__(self) -> str:
         return f"Listener(id={self._handle.id() if self._handle.is_open() else 0})"

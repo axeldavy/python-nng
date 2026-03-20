@@ -14,9 +14,12 @@
 # RespondentSocket – respondent0
 # BusSocket     – bus0
 
+from os import pipe
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from selectors import DefaultSelector as _DefaultSelector, EVENT_READ as _EVENT_READ
 import enum as _enum
+
+from libcpp.memory cimport shared_ptr
 
 # ── Pipe event trampoline (GIL-free) ─────────────────────────────────────────
 
@@ -29,8 +32,8 @@ cdef void _pipe_trampoline(nng_pipe pipe,
     REM_POST events arrive after nng has already destroyed the pipe handle,
     so calling nng_pipe_socket() at dispatch time would return an invalid id.
     """
-    cdef uint32_t sock_id = nng_socket_id(nng_pipe_socket(pipe))
-    _pipe_event_queue.push(sock_id, pipe.id, <int>ev)
+    cdef PipeCollection* pipe_collection = <PipeCollection*>arg
+    pipe_collection.handle_event(pipe, ev)
     _dispatch_queue.push(0)   # sentinel – wakes dispatcher; id=0 is ignored
 
 
@@ -70,87 +73,130 @@ cdef class Pipe:
     the underlying socket is unaffected.
     """
 
-    cdef PipeHandle _handle
+    # Underlying handle, sharing the reference with the parent SocketHandle's PipeCollection.
+    cdef shared_ptr[PipeHandle] _handle
+
+    # Last known status (for change callbacks)
+    cdef DCGMutex _status_mutex
+    cdef uint32_t _last_known_status
+    cdef object _change_callback
+
+    # Weak references to parent objects
+    cdef object _weak_socket_ref
+    cdef object _weak_dialer_ref
+    cdef object _weak_listener_ref
 
     cdef object __weakref__
 
+    def __init__(self):
+        raise TypeError("Pipes cannot be instantiated directly")
+
     @staticmethod
-    cdef Pipe _from_nng(nng_pipe p):
+    cdef Pipe create(shared_ptr[PipeHandle] h, Socket sock, Dialer dialer, Listener listener):
         cdef Pipe obj = Pipe.__new__(Pipe)
-        obj._handle = PipeHandle(p)
+        obj._handle = h
+        obj._weak_socket_ref = _weakref(sock)
+        obj._weak_dialer_ref = _weakref(dialer) if dialer is not None else None
+        obj._weak_listener_ref = _weakref(listener) if listener is not None else None
+        obj._last_known_status = h.get().get_status()
+        _PIPE_REGISTRY[h.get().get_id()] = obj
         return obj
 
     @property
     def id(self) -> int:
         """Numeric pipe ID."""
-        return self._handle.get_id()
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+        return self._handle.get().get_id()
 
-    def __index__(self): return self._handle.get_id()
-    def __hash__(self):  return self._handle.get_id()
+    def __index__(self): return self._handle.get().get_id()
+    def __hash__(self):  return self._handle.get().get_id()
     def __eq__(self, other):
         if not isinstance(other, Pipe):
             return NotImplemented
-        return self._handle == (<Pipe>other)._handle
+        return self._handle.get().get_id() == (<Pipe>other)._handle.get().get_id()
     def __ne__(self, other):
         if not isinstance(other, Pipe):
             return NotImplemented
-        return self._handle != (<Pipe>other)._handle
+        return self._handle.get().get_id() != (<Pipe>other)._handle.get().get_id()
 
     @property
     def status(self) -> PipeStatus:
         """Current :class:`PipeStatus` of this pipe."""
-        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
-        if sock is None:
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+
+        # We set the closed status a bit earlier than the callback informs us.
+        if self._last_known_status == NNG_PIPE_EV_REM_POST:
             return PipeStatus.REMOVED
-        return (<Socket>sock).get_pipe_status(self._handle.get_id())
+
+        return PipeStatus(self._handle.get().get_status())
 
     @property
     def on_status_change(self):
         """Callback fired when this pipe transitions to ACTIVE or REMOVED."""
-        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
-        if sock is None:
-            return None
-        return (<Socket>sock).get_pipe_cb(self._handle.get_id())
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._status_mutex)
+
+        return self._change_callback
 
     @on_status_change.setter
     def on_status_change(self, cb):
-        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
-        if sock is not None:
-            (<Socket>sock).set_pipe_cb(self._handle.get_id(), cb)
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._status_mutex)
+
+        if not callable(cb) and cb is not None:
+            raise ValueError("on_status_change must be set to a callable or None")
+
+        self._change_callback = cb
 
     @property
     def socket(self):
         """The owning :class:`Socket`, or ``None`` if no longer tracked."""
-        return _socket_registry.get(nng_socket_id(self._handle.get_socket()))
+        return self._weak_socket_ref() if self._weak_socket_ref is not None else None
 
     @property
     def dialer(self):
         """The :class:`Dialer` that created this pipe, or ``None``."""
-        cdef nng_dialer d = self._handle.get_dialer()
-        if d.id == 0:
-            return None
-        # Locate within the owning socket's dialer list
-        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
-        if sock is None:
-            return None
-        for dl in (<Socket>sock)._dialers:
-            if (<Dialer>dl)._handle.id() == d.id:
-                return dl
-        return None
+        return self._weak_dialer_ref() if self._weak_dialer_ref is not None else None
 
     @property
     def listener(self):
         """The :class:`Listener` that accepted this pipe, or ``None``."""
-        cdef nng_listener li = self._handle.get_listener()
-        if li.id == 0:
-            return None
-        sock = _socket_registry.get(nng_socket_id(self._handle.get_socket()))
-        if sock is None:
-            return None
-        for ln in (<Socket>sock)._listeners:
-            if (<Listener>ln)._handle.id() == li.id:
-                return ln
-        return None
+        return self._weak_listener_ref() if self._weak_listener_ref is not None else None
+
+    cdef void handle_status_change(self):
+        """Check the current status of this pipe and fire the callback if it has changed."""
+        # Fail silently on invalid pipe
+        if not self._handle:
+            return
+
+        # Fire the callback on change
+        self._handle_status_change_internal(self._handle.get().get_status())
+
+    cdef void _handle_status_change_internal(self, uint32_t new_status):
+        """Set the new status, and if it has changed from the last known status 
+        and is not REMOVED, fire the callback.
+        """
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._status_mutex)
+
+        # Fail silently on invalid pipe
+        if not self._handle:
+            return
+
+        # Fire the callback on change
+        if new_status != self._last_known_status \
+           and self._last_known_status != NNG_PIPE_EV_REM_POST:
+            self._last_known_status = new_status
+            cb = self.on_status_change
+            lock.unlock()
+
+            if cb is not None:
+                try:
+                    cb()
+                except Exception:
+                    _print_exc()
 
     def close(self) -> None:
         """Forcibly close this connection.
@@ -158,17 +204,22 @@ cdef class Pipe:
         The underlying transport is terminated immediately.  Dialers attempt to
         reconnect; listeners wait for a new inbound connection.  In-flight
         sends/receives on this pipe fail immediately.
+
+        If a change callback is registered it fires when the close completes.
         """
-        check_err(self._handle.close())
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+
+        check_err(self._handle.get().close())
+
+        # Handle status change immediately
+        self._handle_status_change_internal(NNG_PIPE_EV_REM_POST)
 
     def __repr__(self) -> str:
-        return f"Pipe(id={self._handle.get_id()}, status={self.status.name})"
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
 
-
-# ── Pipe-event constants (re-exported at module level for backward compat) ────
-PIPE_EV_ADD_PRE  = NNG_PIPE_EV_ADD_PRE
-PIPE_EV_ADD_POST = NNG_PIPE_EV_ADD_POST
-PIPE_EV_REM_POST = NNG_PIPE_EV_REM_POST
+        return f"Pipe(id={self._handle.get().get_id()}, status={self.status.name})"
 
 
 # ── Socket base class ─────────────────────────────────────────────────────────
@@ -279,8 +330,6 @@ cdef class Socket:
     # ── Pipe tracking (guarded by _pipe_mutex) ────────────────────────────
     cdef DCGMutex _pipe_mutex
     cdef list     _pipes            # ordered list of live Pipe objects
-    cdef dict     _pipe_statuses    # int(pipe_id) → PipeStatus
-    cdef dict     _pipe_cbs_table   # int(pipe_id) → callable | None
     cdef object   _on_new_pipe_cb   # callable(Pipe) | None (ADD_PRE)
 
     # For polling. Lazy init.
@@ -295,8 +344,6 @@ cdef class Socket:
         self._dialers = []
         self._listeners = []
         self._pipes = []
-        self._pipe_statuses = {}
-        self._pipe_cbs_table = {}
         self._on_new_pipe_cb = None
         self._fd_recv = -1
         self._fd_send = -1
@@ -308,138 +355,93 @@ cdef class Socket:
         self._handle is assigned (i.e. after nng_xxx_open succeeds).
         """
         cdef nng_socket raw = self._handle.get().raw()
-        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_PRE,  _pipe_trampoline, NULL))
-        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_POST, _pipe_trampoline, NULL))
-        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_REM_POST, _pipe_trampoline, NULL))
-        _socket_registry[nng_socket_id(raw)] = self
+        _SOCKET_REGISTRY[nng_socket_id(raw)] = self
+        # Note: pipe_collection remains alive as long as the SocketHandle is alive,
+        # and _pipe_trampoline won't be called after SocketHandle is destroyed,
+        # so it's safe to capture a pointer to the pipe_collection here.
+        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_PRE,  _pipe_trampoline, <void*>self._handle.get().pipe_collection()))
+        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_POST, _pipe_trampoline, <void*>self._handle.get().pipe_collection()))
+        check_err(nng_pipe_notify(raw, NNG_PIPE_EV_REM_POST, _pipe_trampoline, <void*>self._handle.get().pipe_collection()))
 
     # __dealloc__ intentionally omitted: shared_ptr[SocketHandle] destructor
     # calls SocketHandle::~SocketHandle() -> nng_socket_close() when ref-count hits 0.
 
     # ── Pipe management cdef methods ──────────────────────────────────────────
 
-    cdef void add_pipe(self, nng_pipe p):
-        """Create a Pipe for *p*, record ADDING status, fire on_new_pipe callback.
+    cdef void update_pipes(self):
+        """Check the inner PipeCollection for any change to pipes and process them"""
+        if not self._handle:
+            return
 
-        Called by the dispatch thread at ADD_PRE.  The _on_new_pipe_cb is
-        copied out under the mutex then called without the mutex held to prevent
-        deadlock if the callback re-enters socket methods.
-        """
-        # Create the pipe
-        cdef Pipe pipe = Pipe._from_nng(p)
-
-        cdef unique_lock[DCGMutex] lock
-        lock_gil_friendly(lock, self._pipe_mutex)
-
-        # Add pipe to list and retrieve callback
-        self._pipes.append(pipe)
-
-        # Set status
-        cdef int pid = pipe.id
-        self._pipe_statuses[pid] = PipeStatus.ADDING
-
-        # Retrieve callback
-        cdef object cb = self._on_new_pipe_cb
-
-        # Release lock before calling the callback
-        lock.unlock()
-
-        # Call the callback with pipe
-        if cb is not None:
-            try:
-                cb(pipe)
-            except Exception:
-                _print_exc()
-
-    cdef void promote_pipe(self, uint32_t pid):
-        """Transition pipe *pid* from ADDING → ACTIVE and fire its callback."""
-        cdef unique_lock[DCGMutex] lock
-        lock_gil_friendly(lock, self._pipe_mutex)
-
-        # Set pipe status and retrieve pipe callback
-        self._pipe_statuses[<int>pid] = PipeStatus.ACTIVE
-        cdef object cb = self._pipe_cbs_table.get(<int>pid)
-
-        # Release lock before calling the callback
-        lock.unlock()
-
-        # Call the pipe callback
-        if cb is not None:
-            try:
-                cb()
-            except Exception:
-                _print_exc()
-
-    cdef void remove_pipe(self, uint32_t pid):
-        """Set pipe *pid* to REMOVED, fire callback, then remove from tables.
-
-        The callback fires while the pipe still appears in *_pipes* (with
-        REMOVED status) so the callback can inspect *socket.pipes*.
-        After the callback returns the pipe is removed from all tracking tables.
-        """
-        cdef int i
+        if not self._handle.get().pipe_collection().had_events():
+            # Fast path: no events have been handled since the last update, so no changes to process.
+            return
 
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
 
-        # Set status to REMOVED and retrieve callback
-        self._pipe_statuses[<int>pid] = PipeStatus.REMOVED
-        cdef object cb = self._pipe_cbs_table.get(<int>pid)
+        cdef vector[shared_ptr[PipeHandle]] pipe_handles = self._handle.get().pipe_collection().get_pipes()
 
-        # Release lock before calling the callback
+        cdef list current_pipes = self._pipes
         lock.unlock()
 
-        # Call the callback
-        if cb is not None:
-            try:
-                cb()
-            except Exception:
-                _print_exc()
+        cdef Pipe pipe
+        for pipe in current_pipes:
+            pipe.handle_status_change()
 
-        # Lock again
-        lock_gil_friendly(lock, self._pipe_mutex)
+        # Remove any pipes that are no longer in the collection
+        cdef list active_pipes = []
+        cdef int i = 0
+        cdef int j
 
-        # Remove from tracking tables after callback has returned.
-        for i in range(len(self._pipes)):
-            if (<Pipe>self._pipes[i])._handle.get_id() == <int>pid:
-                del self._pipes[i]
+        # Current_pipes and pipe_handles are in the same order
+        for pipe in current_pipes:
+            if i >= pipe_handles.size():
                 break
-        self._pipe_statuses.pop(<int>pid, None)
-        self._pipe_cbs_table.pop(<int>pid, None)
+            if pipe._handle.get().get_id() == pipe_handles[i].get().get_id():
+                active_pipes.append(pipe)
+                i += 1
 
-    cdef object get_pipe(self, int pid):
-        """Return the Pipe object for *pid*, or ``None`` if unknown."""
-        cdef unique_lock[DCGMutex] lock
+        # Add novel pipes
+        new_pipes = []
+        for j in range(i, pipe_handles.size()):
+            new_pipes.append(self._create_pipe(pipe_handles[j]))
+
+        active_pipes.extend(new_pipes)
+
+        # Update recording of pipes and retrieve pipe creation callback
         lock_gil_friendly(lock, self._pipe_mutex)
+        self._pipes = active_pipes
+        cb = self._on_new_pipe_cb
+        lock.unlock()
 
-        for i in range(len(self._pipes)):
-            if (<Pipe>self._pipes[i])._handle.get_id() == <int>pid:
-                return self._pipes[i]
-        return None
+        # Call the callbacks for new pipes outside the lock
+        if cb is not None:
+            for pipe in new_pipes:
+                try:
+                    cb(pipe)
+                except Exception:
+                    _print_exc()
 
-    cdef object get_pipe_status(self, int pid):
-        """Return the current :class:`PipeStatus` for *pid* (REMOVED if unknown)."""
-        cdef unique_lock[DCGMutex] lock
-        lock_gil_friendly(lock, self._pipe_mutex)
+    cdef Pipe _create_pipe(self, shared_ptr[PipeHandle] h):
+        """Create a Pipe object for the given handle, and find its dialer/listener if any."""
+        # Find dialer and listener for this pipe (if any).
+        cdef nng_dialer d = h.get().get_dialer()
+        cdef nng_listener l = h.get().get_listener()
+        cdef Dialer dialer = None
+        cdef Listener listener = None
+        if d.id != 0:
+            for dl in self._dialers:
+                if (<Dialer>dl)._handle.id() == d.id:
+                    dialer = dl
+                    break
+        if l.id != 0:
+            for ln in self._listeners:
+                if (<Listener>ln)._handle.id() == l.id:
+                    listener = ln
+                    break
 
-        return self._pipe_statuses.get(pid, PipeStatus.REMOVED)
-
-    cdef void set_pipe_cb(self, int pid, object cb):
-        """Register or clear the on_status_change callback for *pid*."""
-        cdef unique_lock[DCGMutex] lock
-        lock_gil_friendly(lock, self._pipe_mutex)
-
-        if cb is None:
-            self._pipe_cbs_table.pop(pid, None)
-        else:
-            self._pipe_cbs_table[pid] = cb
-
-    cdef object get_pipe_cb(self, int pid):
-        """Return the on_status_change callback for *pid*, or ``None``."""
-        cdef unique_lock[DCGMutex] lock
-        lock_gil_friendly(lock, self._pipe_mutex)
-
-        return self._pipe_cbs_table.get(pid)
+        return Pipe.create(h, self, dialer, listener)
 
     cdef inline void _check(self) except *:
         if not self._handle or not self._handle.get().is_open():
@@ -458,16 +460,27 @@ cdef class Socket:
             disrupt transfers that are still in progress.
         """
         cdef unique_lock[DCGMutex] lock
-        if self._handle and self._handle.get().is_open():
-            # Clear pipe tracking before closing so callbacks cannot fire after close.
-            lock_gil_friendly(lock, self._pipe_mutex)
-            self._on_new_pipe_cb = None
-            self._pipes.clear()
-            self._pipe_statuses.clear()
-            self._pipe_cbs_table.clear()
-            lock.unlock()
-            with nogil:
-                self._handle.get().close()
+        lock_gil_friendly(lock, self._pipe_mutex)
+
+        if not self._handle or not self._handle.get().is_open():
+            return  # already closed; no-op
+    
+        # Clear pipe tracking before closing so callbacks cannot fire after close.
+        self._on_new_pipe_cb = None
+        pipes = self._pipes.copy()  # copy for safe iteration after releasing lock
+        self._pipes.clear()
+        self._handle.get().pipe_collection().clear()
+        lock.unlock()
+        with nogil:
+            self._handle.get().close()
+
+        # fire REMOVED callbacks for all pipes
+        cdef Pipe pipe
+        for pipe in pipes:
+            try:
+                pipe.handle_status_change()
+            except Exception:
+                _print_exc()
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
@@ -677,7 +690,7 @@ cdef class Socket:
             check_err(dh.set_ms(b"recv-timeout", recv_timeout))
         if send_timeout is not None:
             check_err(dh.set_ms(b"send-timeout", send_timeout))
-        cdef Dialer obj = Dialer.create(move(dh))
+        cdef Dialer obj = Dialer.create(move(dh), self)
         self._dialers.append(obj)
         return obj
 
@@ -745,7 +758,7 @@ cdef class Socket:
             check_err(lh.set_ms(b"recv-timeout", recv_timeout))
         if send_timeout is not None:
             check_err(lh.set_ms(b"send-timeout", send_timeout))
-        cdef Listener obj = Listener.create(move(lh))
+        cdef Listener obj = Listener.create(move(lh), self)
         self._listeners.append(obj)
         return obj
 
@@ -1239,6 +1252,10 @@ cdef class Socket:
         removed.  Inspect :attr:`Pipe.status` for the state of each pipe.
         """
         self._check()
+
+        # Process any pending pipe events (does call callbacks)
+        self.update_pipes()
+
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
         return list(self._pipes)
@@ -1260,8 +1277,14 @@ cdef class Socket:
             keep it short and non-blocking.
         """
         self._check()
+
+        # Process any pending pipe events (does call callbacks)
+        self.update_pipes()
+
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+
+        # Set the new callback
         self._on_new_pipe_cb = callback
 
     def __repr__(self) -> str:

@@ -458,9 +458,11 @@ cdef class Message:
     def pipe(self):
         """The :class:`Pipe` this message arrived on, or ``None``.
 
-        Returns ``None`` if the message was not received over a socket pipe
-        (e.g. freshly allocated messages).  The returned :class:`Pipe` is the
-        live wrapper from the owning socket's ``pipes`` list.
+        Returns ``None`` if:
+            - The message was not received over a socket pipe (fresh allocation)
+            - The message was received over a pipe that has since been closed.
+
+        Else returns the pipe.
         """
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._lock)
@@ -468,15 +470,31 @@ cdef class Message:
         self._check_validity()
 
         cdef nng_pipe p = self._handle.get_pipe()
+        # Pipe closed or not set
         if p.id == 0:
             return None
 
         lock.unlock()   # release before touching Python structures
+    
+        # Fast path: pipe in registry (most common case when pipe is still alive)
+        pipe = _PIPE_REGISTRY.get(p.id, None)
+        if pipe is not None:
+            return pipe
 
-        sock = _socket_registry.get(nng_socket_id(nng_pipe_socket(p)))
-        if sock is None:
-            return None
-        return (<Socket>sock).get_pipe(p.id)
+        # Case where the pipe is not yet live
+        cdef Socket s = _SOCKET_REGISTRY.get(p.get_socket().id, None)
+        if s is None:
+            return None # If the socket is already closed, the pipe must be closed too, so return None
+
+        # Flush live pipes
+        s.update_pipes()
+
+        # Retry
+        pipe = _PIPE_REGISTRY.get(p.id, None)
+        if pipe is not None:
+            return pipe
+
+        return None
 
     def __eq__(self, other) -> bool:
         """True when both messages have identical body bytes (memcmp)."""

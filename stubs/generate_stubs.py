@@ -536,7 +536,6 @@ def emit_class(cls: type) -> list[str]:
 # ============================================================================
 
 _KNOWN_INT_CONSTANTS = {
-    "PIPE_EV_ADD_PRE", "PIPE_EV_ADD_POST", "PIPE_EV_REM_POST",
     "TLS_AUTH_NONE", "TLS_AUTH_OPTIONAL", "TLS_AUTH_REQUIRED",
     "TLS_VERSION_1_2", "TLS_VERSION_1_3",
 }

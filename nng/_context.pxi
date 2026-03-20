@@ -391,6 +391,17 @@ cdef class SubContext(Context):
     parent socket. They thus can be used to implement multiple logical
     subscribers sharing the same underlying socket.
     """
+
+    @staticmethod
+    cdef SubContext open(Socket socket):
+        """Open a new context on *socket* and return a SubContext wrapping it."""
+        cdef int err = 0
+        cdef shared_ptr[ContextHandle] ch = make_context(socket._handle, err)
+        check_err(err)
+        cdef SubContext ctx = SubContext.__new__(SubContext)
+        ctx._handle = ch
+        return ctx
+
     def subscribe(self, prefix: bytes = b"") -> None:
         """Subscribe to messages whose body starts with *prefix*.
 

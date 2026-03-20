@@ -35,6 +35,9 @@ from cpython.buffer cimport PyBUF_FORMAT, Py_buffer
 from cpython.exc cimport PyErr_CheckSignals
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
+
+from weakref import ref as _weakref, WeakValueDictionary as _WeakValueDictionary
+
 cimport cython
 
 # Pull in all the corrected C declarations
@@ -93,36 +96,24 @@ from traceback import print_exc as _print_exc
 cdef int _nng_initialized = 0
 cdef object _nng_init_lock = _threading.Lock()
 
-# ── Pipe event queue ──────────────────────────────────────────────────────────
-# GIL-free queue for pipe lifecycle events.  The nng callback thread pushes
-# (pipe_id, ev) pairs; the dispatcher thread drains them after being woken
-# by a sentinel 0 push into _dispatch_queue.
-cdef PipeEventQueue* _pipe_event_queue = new PipeEventQueue()
-cdef DCGMutex _pipe_event_mutex
+# ── Pipe event refresh in dispatch thread  ──────────────────────────────────────────────────────────
 
-# Weak registry: int(socket_id) → Socket.  Populated at socket creation;
-# entries vanish automatically when the Socket is garbage-collected.
-import weakref as _weakref
-_socket_registry = _weakref.WeakValueDictionary()
+# Weak registry: int(socket_id) → Socket.  Populated at socket creation
+_SOCKET_REGISTRY = _WeakValueDictionary()
+
+# Same with pipes
+_PIPE_REGISTRY = _WeakValueDictionary()
+
 
 cdef void _drain_pipe_events():
     """
-    Drain all pending pipe events from _pipe_event_queue.
+    Drain all pending pipe events.
 
-    Can be called from any thread
+    Called only from the dispatcher thread
     """
-    cdef unique_lock[DCGMutex] lock
-    cdef uint32_t psid = 0
-    cdef uint32_t ppid = 0
-    cdef int pev = 0
 
-    # Ensure only one thread dispatches pipe events at a time
-    lock_gil_friendly(lock, _pipe_event_mutex)
-
-    cdef bint pgot = _pipe_event_queue.get_ready(psid, ppid, pev)
-    while pgot:
-        _dispatch_pipe_event(psid, ppid, pev)
-        pgot = _pipe_event_queue.get_ready(psid, ppid, pev)
+    for socket in _SOCKET_REGISTRY.values():
+        (<Socket>socket).update_pipes()
 
 
 # ── AIO dispatch queue ────────────────────────────────────────────────────────
@@ -142,7 +133,15 @@ cdef object _dispatch_thread = None
 
 cdef inline void _dispatch_one(uint64_t op_id):
     """Pop and invoke the callable registered for op_id (GIL held)."""
+    if op_id == 0:
+        # Sentinel value: just drain pipe events.
+        _drain_pipe_events()
+        return
+
+    # Look up the op_id in the registry and pop the callback.
     cb = _dispatch_callables.pop(op_id, None)
+
+    # Call the callback if found; ignore if not (e.g. if the op was cancelled and its callback removed).
     if cb is not None:
         try:
             cb()
@@ -193,7 +192,6 @@ def _nng_fini():
     if _nng_initialized:
         # Stop both queues so the dispatcher thread exits its loop.
         _dispatch_queue.stop()
-        _pipe_event_queue.stop()
         if _dispatch_thread is not None:
             _dispatch_thread.join(timeout=2.0)
             _dispatch_thread = None
@@ -218,29 +216,10 @@ include "_listener.pxi"  # Listener
 include "_socket.pxi"    # Socket base + all protocol subclasses
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pipe event dispatch  (defined here, after _socket.pxi, so Socket / Pipe /
-# PipeStatus are available; called from _aio_dispatch_loop below)
+# event dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
-cdef inline void _dispatch_pipe_event(uint32_t sock_id, uint32_t pipe_id, int ev):
-    """Process one pipe lifecycle event from _pipe_event_queue (GIL held).
 
-    sock_id was captured in the trampoline while the pipe was still alive;
-    do NOT call nng_pipe_socket() here — for REM_POST the pipe handle is
-    already destroyed and the call would return an invalid id.
-    """
-    cdef nng_pipe p
-    p.id = pipe_id
-    sock = _socket_registry.get(sock_id)
-    if sock is None:
-        return
-    cdef Socket s = <Socket>sock
-    if ev == NNG_PIPE_EV_ADD_PRE:
-        s.add_pipe(p)
-    elif ev == NNG_PIPE_EV_ADD_POST:
-        s.promote_pipe(pipe_id)
-    elif ev == NNG_PIPE_EV_REM_POST:
-        s.remove_pipe(pipe_id)
 
 
 def _aio_dispatch_loop():
@@ -263,14 +242,11 @@ def _aio_dispatch_loop():
             _dispatch_one(op_id)
             got = _dispatch_queue.get_ready(op_id)
 
-        # 2. Drain all pending pipe events.
-        _drain_pipe_events()
-
-        # 3. Check stop conditions before blocking.
+        # 2. Check stop conditions before blocking.
         if _dispatch_queue.is_stopped():
             break
 
-        # 4. Block (GIL released) waiting for the next item or a 150 ms wake-up.
+        # 3. Block (GIL released) waiting for the next item or a 150 ms wake-up.
         #    The short timeout lets us re-check interpreter state periodically.
         with nogil:
             got = _dispatch_queue.wait_for(op_id, 150)

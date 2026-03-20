@@ -197,9 +197,11 @@ class Message:
         """
         The :class:`Pipe` this message arrived on, or ``None``.
 
-        Returns ``None`` if the message was not received over a socket pipe
-        (e.g. freshly allocated messages).  The returned :class:`Pipe` is the
-        live wrapper from the owning socket's ``pipes`` list.
+        Returns ``None`` if:
+            - The message was not received over a socket pipe (fresh allocation)
+            - The message was received over a pipe that has since been closed.
+
+        Else returns the pipe.
         """
         ...
 
@@ -543,6 +545,9 @@ class Pipe:
     The ``Pipe`` object is **non-owning** — closing it kicks the connection;
     the underlying socket is unaffected.
     """
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
     @property
     def dialer(self) -> Dialer | None:
         """The :class:`Dialer` that created this pipe, or ``None``."""
@@ -582,6 +587,8 @@ class Pipe:
         The underlying transport is terminated immediately.  Dialers attempt to
         reconnect; listeners wait for a new inbound connection.  In-flight
         sends/receives on this pipe fail immediately.
+
+        If a change callback is registered it fires when the close completes.
         """
         ...
 
@@ -668,6 +675,11 @@ class Dialer:
         ...
 
     @property
+    def pipe(self) -> Pipe | None:
+        """The active :class:`Pipe` for this dialer, or ``None`` if not connected."""
+        ...
+
+    @property
     def reconnect_max_ms(self) -> Any:
         """
         Maximum reconnect interval in milliseconds.
@@ -728,6 +740,11 @@ class Dialer:
         NngClosed
             If the dialer has been closed.
         """
+        ...
+
+    @property
+    def socket(self) -> Socket | None:
+        """The parent :class:`Socket` for this dialer."""
         ...
 
     def close(self) -> None:
@@ -836,6 +853,11 @@ class Listener:
         ...
 
     @property
+    def pipes(self) -> list[Pipe]:
+        """The active :class:`Pipe`(s) for this listener."""
+        ...
+
+    @property
     def recv_timeout(self) -> int:
         """
         Per-listener receive timeout in milliseconds (-1 = infinite, 0 = non-blocking).
@@ -863,6 +885,11 @@ class Listener:
         NngClosed
             If the listener has been closed.
         """
+        ...
+
+    @property
+    def socket(self) -> Socket | None:
+        """The parent :class:`Socket` for this listener."""
         ...
 
     def close(self) -> None:
@@ -937,12 +964,14 @@ class Context:
 
     @property
     def recv_timeout(self) -> int:
+        """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
         ...
     @recv_timeout.setter
     def recv_timeout(self, value: int) -> None: ...
 
     @property
     def send_timeout(self) -> int:
+        """Send timeout in ms."""
         ...
     @send_timeout.setter
     def send_timeout(self, value: int) -> None: ...
@@ -1304,6 +1333,7 @@ class Socket:
                 # or equivalently:
                 # await watcher.__anext__()
                 # data = sock.recv(nonblock=True)
+            await watcher.aclose()
         """
         ...
 
@@ -1339,6 +1369,7 @@ class Socket:
                 msg = sock.recv(nonblock=True)
                 await send_watcher.__anext__()
                 sock.send(reply, nonblock=True)
+            await send_watcher.aclose()
         """
         ...
 
@@ -1378,16 +1409,12 @@ class Socket:
 
     def recv(self, *, nonblock: bool = False) -> Message:
         """
-        Receive and return an :class:`Message` (zero-copy via buffer protocol).
+        Receive and return a :class:`Message` (zero-copy via buffer protocol).
 
         Parameters
         ----------
         nonblock:
-            If *True* raise :exc:`NngAgain` if no message is ready.
-
-        NOTE: Signals such as KeyBoardInterrupt (Ctrl-C) are not handled
-        during this function. Thus avoid blocking calls on the main thread.
-        Use submit_recv().result() for a blocking call that handles Ctrl-C.
+            If *True*, raise :exc:`NngAgain` if no message is ready.
         """
         ...
 
@@ -1397,14 +1424,10 @@ class Socket:
 
         Parameters
         ----------
-        msg:
-            The :class:`Message` to send.
+        data:
+            The :class:`Message` (or bytes-like) to send.
         nonblock:
-            If *True* raise :exc:`NngAgain` instead of blocking.
-
-        NOTE: Signals such as KeyBoardInterrupt (Ctrl-C) are not handled
-        during this function. Thus avoid blocking calls on the main thread.
-        Use submit_send().result() for a blocking call that handles Ctrl-C.
+            If *True*, raise :exc:`NngAgain` instead of blocking.
         """
         ...
 
@@ -1511,6 +1534,18 @@ class SubSocket(Socket):
         sub.subscribe(b"news.")  # also accept prefix-matched topics
         msg = sub.recv()
     """
+    @property
+    def skip_older_on_full_queue(self) -> Any:
+        """
+        Whether to drop older messages when the receive queue is full.
+
+        By default, when the receive queue is full, newer messages are kept and
+        older unread messages are dropped.  Setting this option to ``False``
+        reverses that behavior: older messages are kept and newer messages are
+        dropped instead.
+        """
+        ...
+
     def open_context(self) -> Context:
         """Open an independent sub context on this socket."""
         ...
@@ -1560,16 +1595,33 @@ class ReqSocket(Socket):
     be in-flight on a different pipe simultaneously.
     """
     @property
+    def resend_tick(self) -> Any:
+        """
+        How often (ms) to check for timed-out requests to resend.
+
+        The socket checks for timed-out requests at this interval.
+        Lower values add overhead, but are needed for short resend_time values.
+
+        The default is 1000 ms.
+        """
+        ...
+
+    @property
     def resend_time(self) -> int:
         """
         How long (ms) to wait for a reply before resending the request.
 
-        If a reply does not arrive within this interval, or if the peer
-        disconnects before replying, the request is retransmitted — potentially
-        on a *different* pipe.  ``-1`` (the default) disables automatic
-        resending; use this when requests are **not** idempotent.  Setting a
-        positive value provides automatic fault-tolerance when working with
-        multiple REP peers.
+        Requests are automatically resent if the peer disconnects.
+
+        resend_time adds a timer at which requests will be resent (even if no
+        disconnection has been detected) to the peer until a reply is received.
+
+        ``-1`` (the default) disables automatic resending (exception on disconnect)
+        Setting a positive value provides automatic fault-tolerance when working with
+        multiple REP peers, or possible packet loss.
+
+        Setting a < 1000ms resend_time requires tuning :attr:`resend_tick` to
+        have real effect.
         """
         ...
     @resend_time.setter
@@ -1635,7 +1687,21 @@ class PushSocket(Socket):
     * **No delivery guarantee**: there is no acknowledgment mechanism.  If
       reliable delivery is required, consider :class:`ReqSocket` instead.
     """
-    ...
+    @property
+    def send_buffer_length(self) -> Any:
+        """
+        Maximum number of messages that can be buffered for sending to a peer.
+
+        Default (0), means operations are unbuffers, and sending will block
+        until a peer is available to receive the message.
+
+        Setting a positive value queues to an intermediate buffer of that many
+        messages.
+
+        The maximum value is 8192.
+        """
+        ...
+
 
 class PullSocket(Socket):
     """
@@ -1750,9 +1816,6 @@ class BusSocket(Socket):
 
 # Module-level constants
 
-PIPE_EV_ADD_POST: int
-PIPE_EV_ADD_PRE: int
-PIPE_EV_REM_POST: int
 TLS_AUTH_NONE: int
 TLS_AUTH_OPTIONAL: int
 TLS_AUTH_REQUIRED: int

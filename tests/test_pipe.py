@@ -67,6 +67,8 @@ def _active_event_for(sock) -> threading.Event:
             if pipe.status == nng.PipeStatus.ACTIVE:
                 event.set()
         pipe.on_status_change = _on_status
+        if pipe.status == nng.PipeStatus.ACTIVE:
+            event.set()  # already active, so set the event directly
 
     sock.on_new_pipe(_on_pipe)
     return event
@@ -207,9 +209,28 @@ def test_on_new_pipe_called_on_connect():
         assert len(received) == 1
         assert received[0].id > 0
 
+def test_on_new_pipe_fills_pipe_fields():
+    """Check pipe fields are immediately available after a blocking start()."""
+    with nng.PairSocket() as srv, nng.PairSocket() as cli:
+        listener = srv.add_listener(URL + "_cb")
+        dialer = cli.add_dialer(URL + "_cb")
 
-def test_on_new_pipe_pipe_status_is_adding():
-    """Inside on_new_pipe, the pipe status must be ADDING."""
+        assert len(srv.pipes) == 0
+        assert len(cli.pipes) == 0
+
+        listener.start()
+        dialer.start(block=True)
+
+        assert dialer.pipe is not None
+        assert len(listener.pipes) == 1
+        assert len(srv.pipes) == 1
+        assert len(cli.pipes) == 1
+
+        
+
+
+def test_on_new_pipe_pipe_status_is_adding_or_active():
+    """Inside on_new_pipe, the pipe status must be ADDING or ACTIVE."""
     statuses: list[nng.PipeStatus] = []
     event = threading.Event()
 
@@ -223,7 +244,7 @@ def test_on_new_pipe_pipe_status_is_adding():
         cli.add_dialer(URL + "_adding").start()
 
         assert event.wait(timeout=_TIMEOUT)
-        assert statuses[0] == nng.PipeStatus.ADDING
+        assert statuses[0] in (nng.PipeStatus.ADDING, nng.PipeStatus.ACTIVE)
 
 
 def test_on_new_pipe_replace_callback():
@@ -298,16 +319,8 @@ def test_on_new_pipe_reject_connection():
 
 def test_pipe_on_status_change_active():
     """on_status_change fires with ACTIVE after the pipe is fully established."""
-    active_event = threading.Event()
-
     with nng.PairSocket() as srv, nng.PairSocket() as cli:
-        def _new_pipe(pipe: nng.Pipe) -> None:
-            def _status_change() -> None:
-                if pipe.status == nng.PipeStatus.ACTIVE:
-                    active_event.set()
-            pipe.on_status_change = _status_change
-
-        srv.on_new_pipe(_new_pipe)
+        active_event = _active_event_for(srv)
         srv.add_listener(URL + "_active").start()
         cli.add_dialer(URL + "_active").start()
 
@@ -334,6 +347,8 @@ def test_pipe_on_status_change_removed():
             elif pipe.status == nng.PipeStatus.REMOVED:
                 removed_event.set()
         pipe.on_status_change = _status_change
+        if pipe.status == nng.PipeStatus.ACTIVE:
+            active_event.set()  # already active, so set the event directly
 
     srv.on_new_pipe(_new_pipe)
     srv.add_listener(URL + "_removed").start()
@@ -367,6 +382,8 @@ def test_pipe_status_lifecycle():
                 removed_event.set()
 
         pipe.on_status_change = _status_change
+        if pipe.status == nng.PipeStatus.ACTIVE:
+            active_event.set()  # already active, so set the event directly
 
     srv.on_new_pipe(_new_pipe)
     srv.add_listener(URL + "_lifecycle").start()
@@ -379,11 +396,9 @@ def test_pipe_status_lifecycle():
     assert removed_event.wait(timeout=_TIMEOUT), "REMOVED not observed"
     srv.close()
 
-    assert nng.PipeStatus.ADDING  in statuses
+    # assert nng.PipeStatus.ADDING  in statuses -> no, can be skipped if too fast
     assert nng.PipeStatus.ACTIVE  in statuses
     assert nng.PipeStatus.REMOVED in statuses
-    # ADDING must come first
-    assert statuses[0] == nng.PipeStatus.ADDING
 
 
 # ── Pipe.close() ──────────────────────────────────────────────────────────────
