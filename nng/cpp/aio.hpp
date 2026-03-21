@@ -54,10 +54,9 @@ private:
         if (!_aio) return;
         // Note: by design we never free in the callback thread.
         if (nng_aio_busy(_aio)) {
-            nng_aio_reap(_aio);
-        } else {
-            nng_aio_free(_aio);
+            nng_aio_stop(_aio);
         }
+        nng_aio_free(_aio);
         _aio = nullptr;
         _ctx_anchor.reset();  // release anchors only after the nng_aio is freed
         _sock_anchor.reset();

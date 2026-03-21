@@ -9,6 +9,7 @@
 from libcpp cimport bool as cpp_bool
 from libcpp.memory cimport shared_ptr, make_shared, unique_ptr, make_unique
 from libcpp.vector cimport vector
+from libcpp.deque cimport deque
 from nng._decls cimport (
     nng_socket, nng_ctx, nng_dialer, nng_listener,
     nng_msg, nng_aio, nng_tls_config, nng_tls_mode,
@@ -187,4 +188,27 @@ cdef extern from "nng/cpp/dispatch.hpp" namespace "nng_cpp" nogil:
         bint wait_for(uint64_t& id, int timeout_ms)
         void stop()
         bint is_stopped()
+
+# ── platform.hpp: fd-based dispatch queues and supporting types ───────────────
+
+cdef extern from "nng/cpp/platform.hpp" namespace "nng_cpp" nogil:
+    cppclass IDispatchQueue:
+        void push(uint64_t id)
+        bint get_ready(uint64_t& id)
+        void drain_ready(deque[uint64_t]& out)
+        int  get_read_fd() const
+        void drain_wakeup()
+
+    cppclass SockDispatchQueue(IDispatchQueue):
+        SockDispatchQueue()
+
+    cppclass PollDispatchQueue(IDispatchQueue):
+        PollDispatchQueue()
+
+    cppclass DispatchQueueContainer:
+        DispatchQueueContainer(shared_ptr[IDispatchQueue] q, uint64_t op_id)
+        void fire()
+
+    shared_ptr[IDispatchQueue] make_sock_dispatch_queue()
+    shared_ptr[IDispatchQueue] make_poll_dispatch_queue()
 

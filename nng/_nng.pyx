@@ -8,7 +8,7 @@
 #cython: cdivision=True
 #cython: cdivision_warnings=False
 #cython: always_allow_keywords=False
-#cython: profile=False
+#cython: profile=True
 #cython: infer_types=False
 #cython: initializedcheck=False
 #cython: c_line_in_traceback=False
@@ -36,7 +36,9 @@ from cpython.exc cimport PyErr_CheckSignals
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 
-from weakref import ref as _weakref, WeakValueDictionary as _WeakValueDictionary
+from weakref import ref as _weakref, \
+    WeakValueDictionary as _WeakValueDictionary, \
+    WeakKeyDictionary as _WeakKeyDictionary
 
 cimport cython
 
@@ -90,6 +92,7 @@ cdef extern from "_trampoline.h":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import atexit as _atexit
+import gc as _gc
 import threading as _threading
 from traceback import print_exc as _print_exc
 
@@ -119,16 +122,16 @@ cdef void _drain_pipe_events():
 # ── AIO dispatch queue ────────────────────────────────────────────────────────
 # Allocated at module import; always valid.  The nng callback thread calls
 # push() (GIL-free).  The dispatcher thread drains via get_ready/wait_for.
-cdef DispatchQueue* _dispatch_queue = new DispatchQueue()
+cdef DispatchQueue* _DISPATCH_QUEUE = new DispatchQueue()
 
 
 # Maps id(op) -> op._dispatch_complete bound method.
 # Written under the GIL before submit; read and erased under the GIL in the
 # dispatcher thread.
-cdef object _dispatch_callables = {}
+cdef object _DISPATCH_CALLABLES = {}
 
 # Dispatcher thread handle (None until first nng_init).
-cdef object _dispatch_thread = None
+cdef object _DISPATCH_THREAD = None
 
 
 cdef inline void _dispatch_one(uint64_t op_id):
@@ -139,7 +142,7 @@ cdef inline void _dispatch_one(uint64_t op_id):
         return
 
     # Look up the op_id in the registry and pop the callback.
-    cb = _dispatch_callables.pop(op_id, None)
+    cb = _DISPATCH_CALLABLES.pop(op_id, None)
 
     # Call the callback if found; ignore if not (e.g. if the op was cancelled and its callback removed).
     if cb is not None:
@@ -150,17 +153,17 @@ cdef inline void _dispatch_one(uint64_t op_id):
 
 
 
-cdef void _start_dispatch_thread():
+cdef void _start_DISPATCH_THREAD():
     """Start the dispatcher daemon thread (called from check_nng_init / initialize)."""
-    global _dispatch_thread
-    if _dispatch_thread is not None and _dispatch_thread.is_alive():
+    global _DISPATCH_THREAD
+    if _DISPATCH_THREAD is not None and _DISPATCH_THREAD.is_alive():
         return
-    _dispatch_thread = _threading.Thread(
+    _DISPATCH_THREAD = _threading.Thread(
         target=_aio_dispatch_loop,
         name="nng-aio-dispatcher",
         daemon=True,
     )
-    _dispatch_thread.start()
+    _DISPATCH_THREAD.start()
 
 
 cdef void check_nng_init() except *:
@@ -183,18 +186,26 @@ cdef void check_nng_init() except *:
                 f"nng auto-init failed: {nng_strerror(<nng_err>rv).decode('ascii', 'replace')}"
             )
         _nng_initialized = 1
-        _start_dispatch_thread()
+        _start_DISPATCH_THREAD()
 
 
 def _nng_fini():
     """Shut down the nng library (called automatically via atexit)."""
-    global _nng_initialized, _dispatch_thread
+    global _nng_initialized, _DISPATCH_THREAD
     if _nng_initialized:
-        # Stop both queues so the dispatcher thread exits its loop.
-        _dispatch_queue.stop()
-        if _dispatch_thread is not None:
-            _dispatch_thread.join(timeout=2.0)
-            _dispatch_thread = None
+        # Stop the dispatch queue so the dispatcher thread exits its loop.
+        _DISPATCH_QUEUE.stop()
+        if _DISPATCH_THREAD is not None:
+            _DISPATCH_THREAD.join(timeout=2.0)
+            _DISPATCH_THREAD = None
+        # Clear in-flight op references before calling nng_fini().
+        # _DISPATCH_CALLABLES holds bound methods that keep _AioCbSync /
+        # _AioCbASync objects alive.  Dropping those refs now triggers
+        # AioHandle::~AioHandle() → nng_aio_free() while nng is still up.
+        # gc.collect() breaks any surviving reference cycles for the same
+        # reason (e.g. op._future ↔ future._done_callbacks[op._on_cancel]).
+        _DISPATCH_CALLABLES.clear()
+        _gc.collect()
         nng_fini()
         _nng_initialized = 0
 
@@ -208,7 +219,8 @@ _atexit.register(_nng_fini)
 include "_errors.pxi"    # NngError hierarchy, check_err()
 include "_message.pxi"   # Message: zero-copy nng_msg* wrapper
 include "_tls.pxi"       # TlsConfig, TlsCert
-include "_aio.pxi"       # _AioOp, _aio_trampoline, _in_flight_ops
+include "_aio_async.pxi"       # _AioCbASync, _aio_cb_async_trampoline
+include "_aio_cb_sync.pxi"        # _AioCbSync, _aio_cb_sync_trampoline
 include "_context.pxi"   # Context (nng_ctx)
 include "_dialer.pxi"    # Dialer
 include "_listener.pxi"  # Listener
@@ -225,7 +237,7 @@ include "_socket.pxi"    # Socket base + all protocol subclasses
 def _aio_dispatch_loop():
     """Target for the dispatcher thread.
 
-    Drains _dispatch_queue and _pipe_event_queue without holding the GIL
+    Drains _DISPATCH_QUEUE and _pipe_event_queue without holding the GIL
     during the wait, so nng's callback threads are never blocked on Python.
     """
     cdef uint64_t op_id = 0
@@ -237,19 +249,19 @@ def _aio_dispatch_loop():
 
     while True:
         # 1. Non-blocking drain: pick up all AIO completions.
-        got = _dispatch_queue.get_ready(op_id)
+        got = _DISPATCH_QUEUE.get_ready(op_id)
         while got:
             _dispatch_one(op_id)
-            got = _dispatch_queue.get_ready(op_id)
+            got = _DISPATCH_QUEUE.get_ready(op_id)
 
         # 2. Check stop conditions before blocking.
-        if _dispatch_queue.is_stopped():
+        if _DISPATCH_QUEUE.is_stopped():
             break
 
         # 3. Block (GIL released) waiting for the next item or a 150 ms wake-up.
         #    The short timeout lets us re-check interpreter state periodically.
         with nogil:
-            got = _dispatch_queue.wait_for(op_id, 150)
+            got = _DISPATCH_QUEUE.wait_for(op_id, 150)
 
         if got:
             _dispatch_one(op_id)
@@ -321,4 +333,4 @@ def initialize(*,
                 f"nng_init() failed: {nng_strerror(<nng_err>rv).decode('ascii', 'replace')}"
             )
         _nng_initialized = 1
-        _start_dispatch_thread()
+        _start_DISPATCH_THREAD()

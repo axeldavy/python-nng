@@ -34,7 +34,7 @@ cdef void _pipe_trampoline(nng_pipe pipe,
     """
     cdef PipeCollection* pipe_collection = <PipeCollection*>arg
     pipe_collection.handle_event(pipe, ev)
-    _dispatch_queue.push(0)   # sentinel – wakes dispatcher; id=0 is ignored
+    _DISPATCH_QUEUE.push(0)   # sentinel – wakes dispatcher; id=0 is ignored
 
 
 # ── PipeStatus ────────────────────────────────────────────────────────────────
@@ -165,16 +165,17 @@ cdef class Pipe:
         """The :class:`Listener` that accepted this pipe, or ``None``."""
         return self._weak_listener_ref() if self._weak_listener_ref is not None else None
 
-    cdef void handle_status_change(self):
+    cdef int handle_status_change(self):
         """Check the current status of this pipe and fire the callback if it has changed."""
         # Fail silently on invalid pipe
         if not self._handle:
-            return
+            return 0
 
         # Fire the callback on change
         self._handle_status_change_internal(self._handle.get().get_status())
+        return 0
 
-    cdef void _handle_status_change_internal(self, uint32_t new_status):
+    cdef int _handle_status_change_internal(self, uint32_t new_status):
         """Set the new status, and if it has changed from the last known status 
         and is not REMOVED, fire the callback.
         """
@@ -183,7 +184,7 @@ cdef class Pipe:
 
         # Fail silently on invalid pipe
         if not self._handle:
-            return
+            return 0
 
         # Fire the callback on change
         if new_status != self._last_known_status \
@@ -197,6 +198,7 @@ cdef class Pipe:
                     cb()
                 except Exception:
                     _print_exc()
+        return 0
 
     def close(self) -> None:
         """Forcibly close this connection.
@@ -336,6 +338,9 @@ cdef class Socket:
     cdef int _fd_recv
     cdef int _fd_send
 
+    # Per-loop AIO dispatch managers; cleared on close.
+    cdef object _aio_managers  # WeakKeyDictionary[loop, _AioAsyncManager]
+
     cdef object __weakref__
 
     def __cinit__(self):
@@ -347,8 +352,9 @@ cdef class Socket:
         self._on_new_pipe_cb = None
         self._fd_recv = -1
         self._fd_send = -1
+        self._aio_managers = _WeakKeyDictionary()
 
-    cdef void _setup_pipe_tracking(self) except *:
+    cdef int _setup_pipe_tracking(self) except *:
         """Register the GIL-free trampoline and add socket to the registry.
 
         Must be called from each concrete subclass __cinit__ immediately after
@@ -362,20 +368,21 @@ cdef class Socket:
         check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_PRE,  _pipe_trampoline, <void*>self._handle.get().pipe_collection()))
         check_err(nng_pipe_notify(raw, NNG_PIPE_EV_ADD_POST, _pipe_trampoline, <void*>self._handle.get().pipe_collection()))
         check_err(nng_pipe_notify(raw, NNG_PIPE_EV_REM_POST, _pipe_trampoline, <void*>self._handle.get().pipe_collection()))
+        return 0
 
     # __dealloc__ intentionally omitted: shared_ptr[SocketHandle] destructor
     # calls SocketHandle::~SocketHandle() -> nng_socket_close() when ref-count hits 0.
 
     # ── Pipe management cdef methods ──────────────────────────────────────────
 
-    cdef void update_pipes(self):
+    cdef int update_pipes(self):
         """Check the inner PipeCollection for any change to pipes and process them"""
         if not self._handle:
-            return
+            return 0
 
         if not self._handle.get().pipe_collection().had_events():
             # Fast path: no events have been handled since the last update, so no changes to process.
-            return
+            return 0
 
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
@@ -423,6 +430,8 @@ cdef class Socket:
                 except Exception:
                     _print_exc()
 
+        return 0
+
     cdef Pipe _create_pipe(self, shared_ptr[PipeHandle] h):
         """Create a Pipe object for the given handle, and find its dialer/listener if any."""
         # Find dialer and listener for this pipe (if any).
@@ -442,6 +451,27 @@ cdef class Socket:
                     break
 
         return Pipe.create(h, self, dialer, listener)
+
+    cdef _AioAsyncManager _get_aio_manager(self):
+        """Return (creating if needed) the AIO manager for the running event loop.
+
+        Returns:
+            The :class:`_AioAsyncManager` bound to the current asyncio loop.
+
+        Raises:
+            RuntimeError: If there is no running event loop.
+        """
+        cdef object loop = _asyncio.get_running_loop()
+        if loop is None:
+            raise RuntimeError("No running event loop")
+
+        # Fast path: manager already exists for this loop.
+        cdef object mgr = self._aio_managers.get(loop)
+        if mgr is None:
+            # Slow path: first asend/arecv on this loop – create and cache the manager.
+            mgr = _AioAsyncManager.create(loop)
+            self._aio_managers[loop] = mgr
+        return <_AioAsyncManager>mgr
 
     cdef inline void _check(self) except *:
         if not self._handle or not self._handle.get().is_open():
@@ -481,6 +511,15 @@ cdef class Socket:
                 pipe.handle_status_change()
             except Exception:
                 _print_exc()
+
+        # Release every AIO manager so add_reader / drain tasks are cleaned up.
+        cdef _AioAsyncManager aio_mgr
+        for aio_mgr_obj in list(self._aio_managers.values()):
+            try:
+                (<_AioAsyncManager>aio_mgr_obj).release()
+            except Exception:
+                _print_exc()
+        self._aio_managers.clear()
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
@@ -976,8 +1015,11 @@ cdef class Socket:
         msg = Message._from_ptr(ptr)
         """
 
-        # Create an aio request
-        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
+        # Obtain the per-loop AIO manager (created lazily on first call).
+        cdef _AioAsyncManager mgr = self._get_aio_manager()
+
+        # Create an aio request via the manager (selects optimal dispatch path).
+        cdef _AioSockASync op = mgr.create_aio_for_socket(self._handle)
 
         # Build the nng message
         cdef nng_msg *ptr = NULL
@@ -1016,6 +1058,7 @@ cdef class Socket:
         # thread, avoiding thread dispatch.
         cdef nng_msg *msg = NULL
         cdef int rv
+        '''
         with nogil:
             rv = nng_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
 
@@ -1027,9 +1070,12 @@ cdef class Socket:
         # On any other error the message was not received and we must raise immediately.
         if rv != NNG_EAGAIN:
             check_err(rv)
+        '''
 
         # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioOp op = _AioOp.create_for_socket(self._handle)
+        # Obtain the per-loop AIO manager (created lazily on first call).
+        cdef _AioAsyncManager mgr = self._get_aio_manager()
+        cdef _AioSockASync op = mgr.create_aio_for_socket(self._handle)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
@@ -1065,7 +1111,7 @@ cdef class Socket:
         self._check()
 
         # Create an aio request
-        cdef _AioOp op = _AioOp.create_for_socket_concurrent(self._handle, False)
+        cdef _AioCbSync op = _AioCbSync.create_for_socket_concurrent(self._handle, False)
 
         # Build the nng message
         cdef nng_msg *ptr = NULL
@@ -1095,7 +1141,7 @@ cdef class Socket:
         self._check()
 
         # Create an aio request
-        cdef _AioOp op = _AioOp.create_for_socket_concurrent(self._handle, True)
+        cdef _AioCbSync op = _AioCbSync.create_for_socket_concurrent(self._handle, True)
 
         # Fetch the future now as get_future is invalid after submission
         fut = op.get_future()

@@ -19,6 +19,8 @@ cdef class Context:
     """
 
     cdef shared_ptr[ContextHandle] _handle
+    cdef object _weak_socket_ref
+
     cdef object __weakref__
 
     def __cinit__(self):
@@ -41,7 +43,9 @@ cdef class Context:
         cdef int err = 0
         cdef shared_ptr[ContextHandle] ch = make_context(socket._handle, err)
         check_err(err)
-        return Context.create(ch)
+        cdef Context ctx = Context.create(ch)
+        ctx._weak_socket_ref = _weakref(socket)
+        return ctx
 
     cdef inline void _check(self) except *:
         if not self._handle or not self._handle.get().is_open():
@@ -57,6 +61,15 @@ cdef class Context:
     @property
     def id(self) -> int:
         return nng_ctx_id(self._handle.get().raw())
+
+    @property
+    def socket(self) -> Socket:
+        """The parent Socket for this context."""
+        self._check()
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        if sock is None:
+            raise NngClosed(NNG_ECLOSED, "Parent socket has been closed")
+        return sock
 
     # ── Synchronous send / recv ────────────────────────────────────────────
 
@@ -226,7 +239,7 @@ cdef class Context:
         # with NONBLOCK first and fall back to the async machinery on EAGAIN.
 
         # Create an aio request
-        cdef _AioOp op = _AioOp.create_for_context(self._handle)
+        cdef _AioCbASync op = _AioCbASync.create_for_context_cb(self._handle)
 
         # Build the nng message
         cdef nng_msg *ptr = NULL
@@ -274,7 +287,7 @@ cdef class Context:
             check_err(rv)
 
         # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioOp op = _AioOp.create_for_context(self._handle)
+        cdef _AioCbASync op = _AioCbASync.create_for_context_cb(self._handle)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
@@ -311,7 +324,7 @@ cdef class Context:
         self._check()
 
         # Create an aio request
-        cdef _AioOp op = _AioOp.create_for_context_concurrent(self._handle, False)
+        cdef _AioCbSync op = _AioCbSync.create_for_context_concurrent(self._handle, False)
 
         # Build the nng message
         cdef nng_msg *ptr = NULL
@@ -341,7 +354,7 @@ cdef class Context:
         self._check()
 
         # Create an aio request
-        cdef _AioOp op = _AioOp.create_for_context_concurrent(self._handle, True)
+        cdef _AioCbSync op = _AioCbSync.create_for_context_concurrent(self._handle, True)
 
         # Fetch the future now as get_future is invalid after submission
         fut = op.get_future()
