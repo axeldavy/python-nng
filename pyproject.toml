@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "cython>=3.0"]
+requires = ["scikit-build-core>=0.10", "cython>=3.1.6", "cmake>=3.20"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -9,11 +9,37 @@ description = "High-performance Python bindings for nng (nanomsg-next-gen)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["nng", "nanomsg", "messaging", "zeromq"]
+keywords = ["nng", "nanomsg", "messaging", "pubsub", "ipc", "request-reply"]
+authors = [
+    { name = "Axel Davy" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Cython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/axeldavy/python-nng"
+Repository = "https://github.com/axeldavy/python-nng"
+"Bug Tracker" = "https://github.com/axeldavy/python-nng/issues"
 
 [tool.scikit-build]
 cmake.build-type = "Release"
 wheel.packages = ["nng"]
+sdist.include = ["thirdparty/nng/**"]
 
 [tool.scikit-build.cmake.define]
 NNG_TESTS = "OFF"

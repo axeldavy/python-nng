@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Honour CMAKE_OSX_ARCHITECTURES from the environment so that cibuildwheel can
+# cross-compile x86_64 wheels from an arm64 runner without extra toolchain files.
+if(APPLE AND DEFINED ENV{CMAKE_OSX_ARCHITECTURES} AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "$ENV{CMAKE_OSX_ARCHITECTURES}"
+        CACHE STRING "Target macOS architectures" FORCE)
+endif()
+
 project(nng_python LANGUAGES C CXX)
 
 # ── Profiling helpers ─────────────────────────────────────────────────────────

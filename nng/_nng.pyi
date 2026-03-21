@@ -976,6 +976,11 @@ class Context:
     @send_timeout.setter
     def send_timeout(self, value: int) -> None: ...
 
+    @property
+    def socket(self) -> Socket | None:
+        """The parent Socket for this context."""
+        ...
+
     async def arecv(self) -> Message:
         """Receive a Message asynchronously through this context."""
         ...
