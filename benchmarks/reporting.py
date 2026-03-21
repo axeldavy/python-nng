@@ -50,6 +50,7 @@ def _competitors_ordered(data: dict[str, Stats]) -> list[str]:
         "nng_async4",
         "nng_async5",
         "nng_async6",
+        "nng_async7",
         "zmq_sync",
         "zmq_async",
         "pynng_sync",
