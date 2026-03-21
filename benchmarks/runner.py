@@ -28,6 +28,12 @@ import threading
 import traceback
 from pathlib import Path
 
+# nng is not fork-safe: newer builds register pthread_atfork handlers that
+# mark the child process as "forked" and refuse further use.  Using the
+# "spawn" start method gives every server worker a clean Python interpreter
+# that imports nng fresh, with no inherited state.
+_MP_CTX = multiprocessing.get_context("spawn")
+
 from ._core.common import COMPETITORS, MSG_SIZES, TRANSPORTS, next_url, RESULTS_DIR
 from ._core.stats import Stats, compute_stats
 
@@ -98,7 +104,7 @@ def _make_events(transport: str):
     """Return (ready, stop) event objects suited for the transport's isolation mode."""
     if transport == "inproc":
         return threading.Event(), threading.Event()
-    return multiprocessing.Event(), multiprocessing.Event()
+    return _MP_CTX.Event(), _MP_CTX.Event()
 
 
 def _launch_server(bench_cls, transport: str, url: str, ready, stop):
@@ -110,7 +116,7 @@ def _launch_server(bench_cls, transport: str, url: str, ready, stop):
             daemon=True,
         )
     else:
-        worker = multiprocessing.Process(
+        worker = _MP_CTX.Process(
             target=bench_cls.run_server,
             args=(url, ready, stop),
             daemon=True,
