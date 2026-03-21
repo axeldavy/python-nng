@@ -235,11 +235,15 @@ cdef class Context:
         """Send a Message asynchronously through this context."""
         self._check()
 
-        # See socket asend() for why we cannot try to send
-        # with NONBLOCK first and fall back to the async machinery on EAGAIN.
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
 
-        # Create an aio request
-        cdef _AioCbASync op = _AioCbASync.create_for_context_cb(self._handle)
+        if sock is None:
+            raise RuntimeError("Invalid Socket")
+
+        # Obtain the per-loop AIO manager (created lazily on first call).
+        cdef _AioAsyncManager mgr = (<Socket>sock).get_aio_manager()
+        cdef _AioSockASync op = mgr.create_aio_for_context(self._handle)
+        del sock
 
         # Build the nng message
         cdef nng_msg *ptr = NULL
@@ -255,7 +259,14 @@ cdef class Context:
         future = op.get_future()
 
         # Submit the operation
-        op.submit_ctx_send(self._handle.get().raw())
+        cdef bint completed = op.submit_ctx_send(self._handle.get().raw())
+
+        # Fast-path: if the AIO is already complete (if rep could be received immediately))
+        if completed:
+            if nng_aio_busy(op._handle.get().get()):
+                nng_aio_wait(op._handle.get().get())
+            check_err(nng_aio_result(op._handle.get().get()))
+            return
 
         # Await completion
         try:
@@ -270,39 +281,37 @@ cdef class Context:
         """Receive a Message asynchronously through this context."""
         self._check()
 
-        # Fast path: non-blocking recv uses a NULL-callback stack aio inside
-        # nng — no task-pool dispatch, no cross-thread wakeups (~200–500 ns).
-        cdef nng_msg *msg = NULL
-        cdef int rv
-        with nogil:
-            rv = nng_ctx_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
+        sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
 
-        # On success the message is received and we can return.
-        if rv == NNG_OK:
-            return Message._from_ptr(msg)
+        if sock is None:
+            raise RuntimeError("Invalid Socket")
 
-        # On EAGAIN the message was not received but we can still proceed to the slow path.
-        # On any other error the message was not received and we must raise immediately.
-        if rv != NNG_EAGAIN:
-            check_err(rv)
-
-        # Slow path: recv queue was empty; use the async aio machinery.
-        cdef _AioCbASync op = _AioCbASync.create_for_context_cb(self._handle)
+        # Obtain the per-loop AIO manager (created lazily on first call).
+        cdef _AioAsyncManager mgr = (<Socket>sock).get_aio_manager()
+        cdef _AioSockASync op = mgr.create_aio_for_context(self._handle)
+        del sock
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
 
         # Submit the operation
-        op.submit_ctx_recv(self._handle.get().raw())
+        cdef bint completed = op.submit_ctx_recv(self._handle.get().raw())
 
-        # Await completion
-        try:
-            await future
-        except _asyncio.CancelledError:
-            op.on_future_cancel()
-            raise
-        finally:
-            op.ensure_finish()
+        # Fast-path: if the AIO is already complete (if rep could be received immediately))
+        if completed:
+            if nng_aio_busy(op._handle.get().get()):
+                nng_aio_wait(op._handle.get().get())
+            check_err(nng_aio_result(op._handle.get().get()))
+
+        else:
+            # Await completion
+            try:
+                await future
+            except _asyncio.CancelledError:
+                op.on_future_cancel()
+                raise
+            finally:
+                op.ensure_finish()
 
         # Retrieve the message from the completed operation
         cdef nng_msg *ptr = op.get_msg()

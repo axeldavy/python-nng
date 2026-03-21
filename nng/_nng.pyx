@@ -8,7 +8,7 @@
 #cython: cdivision=True
 #cython: cdivision_warnings=False
 #cython: always_allow_keywords=False
-#cython: profile=True
+#cython: profile=False
 #cython: infer_types=False
 #cython: initializedcheck=False
 #cython: c_line_in_traceback=False

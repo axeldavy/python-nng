@@ -14,8 +14,8 @@
 #     • nng_aio_result() to get the error code
 #     • resolve asyncio Future via loop.call_soon_threadsafe()
 
-import asyncio as _asyncio
-import concurrent.futures as _concurrent_futures
+from asyncio import CancelledError as _CancelledError, \
+    get_running_loop as _get_running_loop
 
 cimport cython
 
@@ -84,7 +84,7 @@ cdef class _AioSockASync:
         cdef _AioSockASync op = _AioSockASync.__new__(_AioSockASync)
 
         # Retrieve loop
-        op._loop   = _asyncio.get_running_loop()
+        op._loop   = _get_running_loop()
         if op._loop is None:
             raise RuntimeError("No running event loop found")
 
@@ -116,7 +116,7 @@ cdef class _AioSockASync:
         cdef _AioSockASync op = _AioSockASync.__new__(_AioSockASync)
 
         # Retrieve loop
-        op._loop   = _asyncio.get_running_loop()
+        op._loop   = _get_running_loop()
         if op._loop is None:
             raise RuntimeError("No running event loop found")
 
@@ -155,7 +155,7 @@ cdef class _AioSockASync:
         if fut is None or loop is None:
             return
 
-        assert loop == _asyncio.get_running_loop(), "Event loop mismatch in _dispatch_complete"
+        assert loop == _get_running_loop(), "Event loop mismatch in _dispatch_complete"
 
         err = nng_aio_result(self._handle.get().get())
 
@@ -201,37 +201,75 @@ cdef class _AioSockASync:
         self._dispatch_callable[id(self)] = self._dispatch_complete
         return 0
 
+    cdef int _cancel_dispatch(self) noexcept:
+        """Unregister the dispatch callable to prevent future dispatch."""
+        if self._dispatch_callable is not None:
+            self._dispatch_callable.pop(id(self), None)
+        return 0
+
     @cython.final
-    cdef int submit_socket_send(self, nng_socket sock):
-        """Submit this op as a socket send."""
+    cdef bint submit_socket_send(self, nng_socket sock):
+        """
+        Submit this op as a socket send.
+        
+        Return True if the operation is already completed
+        """
         self._prepare_submit()
         with nogil:
             nng_socket_send(sock, self._handle.get().get())
-        return 0
+
+        # The else False is for _AioCbASync which uses a different trampoline
+        cdef bint skipped = self._container.get().reach_skip_point() if self._container else False
+        if skipped:
+            self._cancel_dispatch()
+        return skipped
 
     @cython.final
-    cdef int submit_socket_recv(self, nng_socket sock):
-        """Submit this op as a socket receive."""
+    cdef bint submit_socket_recv(self, nng_socket sock):
+        """
+        Submit this op as a socket receive.
+        
+        Return True if the operation is already completed
+        """
         self._prepare_submit()
         with nogil:
             nng_socket_recv(sock, self._handle.get().get())
-        return 0
+
+        cdef bint skipped = self._container.get().reach_skip_point() if self._container else False
+        if skipped:
+            self._cancel_dispatch()
+        return skipped
 
     @cython.final
-    cdef int submit_ctx_send(self, nng_ctx ctx):
-        """Submit this op as a context send."""
+    cdef bint submit_ctx_send(self, nng_ctx ctx):
+        """
+        Submit this op as a context send.
+        
+        Return True if the operation is already completed
+        """
         self._prepare_submit()
         with nogil:
             nng_ctx_send(ctx, self._handle.get().get())
-        return 0
+
+        cdef bint skipped = self._container.get().reach_skip_point() if self._container else False
+        if skipped:
+            self._cancel_dispatch()
+        return skipped
 
     @cython.final
-    cdef int submit_ctx_recv(self, nng_ctx ctx):
-        """Submit this op as a context receive."""
+    cdef bint submit_ctx_recv(self, nng_ctx ctx):
+        """Submit this op as a context receive.
+        
+        Return True if the operation is already completed
+        """
         self._prepare_submit()
         with nogil:
             nng_ctx_recv(ctx, self._handle.get().get())
-        return 0
+
+        cdef bint skipped = self._container.get().reach_skip_point() if self._container else False
+        if skipped:
+            self._cancel_dispatch()
+        return skipped
 
     @cython.final
     cdef object get_future(self):
@@ -283,7 +321,7 @@ cdef class _AioCbASync(_AioSockASync):
         cdef _AioCbASync op = _AioCbASync.__new__(_AioCbASync)
 
         # Retrieve loop
-        op._loop   = _asyncio.get_running_loop()
+        op._loop   = _get_running_loop()
         if op._loop is None:
             raise RuntimeError("No running event loop found")
 
@@ -303,7 +341,7 @@ cdef class _AioCbASync(_AioSockASync):
         cdef _AioCbASync op = _AioCbASync.__new__(_AioCbASync)
 
         # Retrieve loop
-        op._loop   = _asyncio.get_running_loop()
+        op._loop   = _get_running_loop()
         if op._loop is None:
             raise RuntimeError("No running event loop found")
 
@@ -354,6 +392,12 @@ cdef class _AioCbASync(_AioSockASync):
 
         # Register the dispatch callable keyed by this object's address.
         _DISPATCH_CALLABLES[id(self)] = self._dispatch_complete
+        return 0
+
+    cdef int _cancel_dispatch(self) noexcept:
+        """Unregister the dispatch callable to prevent future dispatch."""
+        global _DISPATCH_CALLABLES
+        _DISPATCH_CALLABLES.pop(id(self), None)
         return 0
 
 
@@ -620,7 +664,7 @@ cdef class _AioAsyncManager:
                         except BaseException:
                             _print_exc()
 
-        except _asyncio.CancelledError:
+        except _CancelledError:
             if not self._releasing:
                 # The task was cancelled by user code; switch to fallback mode.
                 self._task_user_cancelled = True

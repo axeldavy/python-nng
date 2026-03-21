@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 project(nng_python LANGUAGES C CXX)
 
+# ── Profiling helpers ─────────────────────────────────────────────────────────
+# Build with: cmake -DPROFILE=ON ...
+# Adds -g + -fno-omit-frame-pointer to both the extension and nng so that
+# `perf record --call-graph fp` can unwind native stacks.
+option(PROFILE "Enable debug symbols and frame pointers for perf profiling" OFF)
+if(PROFILE)
+    message(STATUS "PROFILE=ON: adding -g -fno-omit-frame-pointer")
+    add_compile_options(-g -fno-omit-frame-pointer)
+    add_link_options(-g)
+endif()
+
 # ── nng submodule (built as a static library) ─────────────────────────────────
 set(NNG_TESTS         OFF CACHE BOOL "" FORCE)
 set(NNG_TOOLS         OFF CACHE BOOL "" FORCE)

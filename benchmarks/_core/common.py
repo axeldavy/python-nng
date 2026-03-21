@@ -60,6 +60,7 @@ C_BUILD_DIR = C_NNG_DIR / "build"
 ## Event loop
 def get_new_event_loop():
     """Return a new asyncio event loop.  Uses uvloop if available."""
+    
     try:
         import uvloop
         return uvloop.new_event_loop()

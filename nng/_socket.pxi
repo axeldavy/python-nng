@@ -14,6 +14,7 @@
 # RespondentSocket – respondent0
 # BusSocket     – bus0
 
+from asyncio import get_running_loop as _get_running_loop
 from os import pipe
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from selectors import DefaultSelector as _DefaultSelector, EVENT_READ as _EVENT_READ
@@ -339,6 +340,7 @@ cdef class Socket:
     cdef int _fd_send
 
     # Per-loop AIO dispatch managers; cleared on close.
+    cdef DCGMutex _aio_mgr_mutex
     cdef object _aio_managers  # WeakKeyDictionary[loop, _AioAsyncManager]
 
     cdef object __weakref__
@@ -452,7 +454,7 @@ cdef class Socket:
 
         return Pipe.create(h, self, dialer, listener)
 
-    cdef _AioAsyncManager _get_aio_manager(self):
+    cdef _AioAsyncManager get_aio_manager(self):
         """Return (creating if needed) the AIO manager for the running event loop.
 
         Returns:
@@ -461,9 +463,12 @@ cdef class Socket:
         Raises:
             RuntimeError: If there is no running event loop.
         """
-        cdef object loop = _asyncio.get_running_loop()
+        cdef object loop = _get_running_loop()
         if loop is None:
             raise RuntimeError("No running event loop")
+
+        cdef unique_lock[DCGMutex] mgr_lock
+        lock_gil_friendly(mgr_lock, self._aio_mgr_mutex)
 
         # Fast path: manager already exists for this loop.
         cdef object mgr = self._aio_managers.get(loop)
@@ -513,6 +518,8 @@ cdef class Socket:
                 _print_exc()
 
         # Release every AIO manager so add_reader / drain tasks are cleaned up.
+        cdef unique_lock[DCGMutex] mgr_lock
+        lock_gil_friendly(mgr_lock, self._aio_mgr_mutex)
         cdef _AioAsyncManager aio_mgr
         for aio_mgr_obj in list(self._aio_managers.values()):
             try:
@@ -520,6 +527,7 @@ cdef class Socket:
             except Exception:
                 _print_exc()
         self._aio_managers.clear()
+        mgr_lock.unlock()
 
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
@@ -1016,7 +1024,7 @@ cdef class Socket:
         """
 
         # Obtain the per-loop AIO manager (created lazily on first call).
-        cdef _AioAsyncManager mgr = self._get_aio_manager()
+        cdef _AioAsyncManager mgr = self.get_aio_manager()
 
         # Create an aio request via the manager (selects optimal dispatch path).
         cdef _AioSockASync op = mgr.create_aio_for_socket(self._handle)
@@ -1035,9 +1043,16 @@ cdef class Socket:
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_send(self._handle.get().raw())
+        cdef bint completed = op.submit_socket_send(self._handle.get().raw())
 
-        # Await completion
+        # Fast-path: if the AIO is already complete (if rep could be sent immediately))
+        if completed:
+            if nng_aio_busy(op._handle.get().get()):
+                nng_aio_wait(op._handle.get().get())
+            check_err(nng_aio_result(op._handle.get().get()))
+            return
+
+        # Await aio completion
         try:
             await future
         except _asyncio.CancelledError:
@@ -1056,9 +1071,10 @@ cdef class Socket:
 
         # Fast path: non-blocking recv can perform in the same
         # thread, avoiding thread dispatch.
+        '''
         cdef nng_msg *msg = NULL
         cdef int rv
-        '''
+
         with nogil:
             rv = nng_recvmsg(self._handle.get().raw(), &msg, NNG_FLAG_NONBLOCK)
 
@@ -1074,23 +1090,30 @@ cdef class Socket:
 
         # Slow path: recv queue was empty; use the async aio machinery.
         # Obtain the per-loop AIO manager (created lazily on first call).
-        cdef _AioAsyncManager mgr = self._get_aio_manager()
+        cdef _AioAsyncManager mgr = self.get_aio_manager()
         cdef _AioSockASync op = mgr.create_aio_for_socket(self._handle)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
 
         # Submit the operation
-        op.submit_socket_recv(self._handle.get().raw())
+        cdef bint completed = op.submit_socket_recv(self._handle.get().raw())
 
-        # Await completion
-        try:
-            await future
-        except _asyncio.CancelledError:
-            op.on_future_cancel()
-            raise
-        finally:
-            op.ensure_finish()
+        # Fast-path: if the AIO is already complete (if rep could be received immediately))
+        if completed:
+            if nng_aio_busy(op._handle.get().get()):
+                nng_aio_wait(op._handle.get().get())
+            check_err(nng_aio_result(op._handle.get().get()))
+
+        else:
+            # Await completion
+            try:
+                await future
+            except _asyncio.CancelledError:
+                op.on_future_cancel()
+                raise
+            finally:
+                op.ensure_finish()
 
         # Retrieve the message from the completed operation
         cdef nng_msg *ptr = op.get_msg()

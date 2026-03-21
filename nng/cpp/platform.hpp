@@ -31,6 +31,7 @@
 // No Python headers or nng headers are required.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -148,9 +149,19 @@ public:
     }
 
     void push(uint64_t id) noexcept override {
-        { std::lock_guard<std::mutex> lk(_mutex); _queue.push_back(id); }
-        char c = 1;
-        send(_write_sock, &c, 1, 0);
+        bool was_empty;
+        {
+            std::lock_guard<std::mutex> lk(_mutex);
+            was_empty = _queue.empty();
+            _queue.push_back(id);
+        }
+        // Only write a wakeup byte when the queue transitions from empty to
+        // non-empty.  The reader drains all pending items in one shot, so a
+        // single byte is sufficient to wake it for an entire burst.
+        if (was_empty) {
+            char c = 1;
+            send(_write_sock, &c, 1, 0);
+        }
     }
 
     bool get_ready(uint64_t& id) noexcept override {
@@ -213,9 +224,16 @@ public:
     }
 
     void push(uint64_t id) noexcept override {
-        { std::lock_guard<std::mutex> lk(_mutex); _queue.push_back(id); }
-        char c = 1;
-        (void)send(_write_sock, &c, 1, MSG_DONTWAIT);
+        bool was_empty;
+        {
+            std::lock_guard<std::mutex> lk(_mutex);
+            was_empty = _queue.empty();
+            _queue.push_back(id);
+        }
+        if (was_empty) {
+            char c = 1;
+            (void)send(_write_sock, &c, 1, MSG_DONTWAIT);
+        }
     }
 
     bool get_ready(uint64_t& id) noexcept override {
@@ -270,9 +288,16 @@ public:
     }
 
     void push(uint64_t id) noexcept override {
-        { std::lock_guard<std::mutex> lk(_mutex); _queue.push_back(id); }
-        char c = 1;
-        (void)write(_write_fd, &c, 1);
+        bool was_empty;
+        {
+            std::lock_guard<std::mutex> lk(_mutex);
+            was_empty = _queue.empty();
+            _queue.push_back(id);
+        }
+        if (was_empty) {
+            char c = 1;
+            (void)write(_write_fd, &c, 1);
+        }
     }
 
     bool get_ready(uint64_t& id) noexcept override {
@@ -331,11 +356,29 @@ public:
     DispatchQueueContainer& operator=(DispatchQueueContainer&&)      = delete;
 
     /// Called from the GIL-free nng trampoline: push op_id to the queue.
-    void fire() noexcept { _queue->push(_op_id); }
+    void fire() noexcept {
+        uint32_t expected = 0;
+        if (_skip_point_reached.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+            // If we run before the skip point, we skip submission
+            return;
+        }
+        _queue->push(_op_id);
+    }
+
+    bool reach_skip_point() noexcept {
+        uint32_t expected = 0;
+        if (_skip_point_reached.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+            // executing before fire() was called
+            return false;
+        }
+        // executing after fire() was called
+        return true;
+    }
 
 private:
     std::shared_ptr<IDispatchQueue> _queue;
     uint64_t                        _op_id;
+    std::atomic<uint32_t>            _skip_point_reached{0}; // set when events are pushed, cleared by had_events()
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -174,7 +174,6 @@ cdef extern from "nng/cpp/aio.hpp" namespace "nng_cpp" nogil:
         AioHandle(nng_aio* a)
         AioHandle(nng_aio* a, shared_ptr[ContextHandle] anchor)
         AioHandle(nng_aio* a, shared_ptr[SocketHandle] anchor)
-        void mark_callback_thread()
         nng_aio* get()
         bint is_valid()
 
@@ -208,6 +207,7 @@ cdef extern from "nng/cpp/platform.hpp" namespace "nng_cpp" nogil:
     cppclass DispatchQueueContainer:
         DispatchQueueContainer(shared_ptr[IDispatchQueue] q, uint64_t op_id)
         void fire()
+        cpp_bool reach_skip_point()
 
     shared_ptr[IDispatchQueue] make_sock_dispatch_queue()
     shared_ptr[IDispatchQueue] make_poll_dispatch_queue()
