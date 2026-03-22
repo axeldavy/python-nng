@@ -32,11 +32,12 @@ cdef extern from "nng/nng.h":
     ctypedef struct nng_cv:           pass
 
     # ── Constants ─────────────────────────────────────────────────────────────
-    int NNG_MAXADDRLEN
-    int NNG_FLAG_NONBLOCK
-    int NNG_DURATION_INFINITE
-    int NNG_DURATION_DEFAULT
-    int NNG_DURATION_ZERO
+    const int NNG_MAXADDRLEN
+    const int NNG_MAXADDRSTRLEN
+    const int NNG_FLAG_NONBLOCK
+    const int NNG_DURATION_INFINITE
+    const int NNG_DURATION_DEFAULT
+    const int NNG_DURATION_ZERO
 
     # ── Identity types ────────────────────────────────────────────────────────
     ctypedef struct nng_ctx_s:
@@ -177,7 +178,10 @@ cdef extern from "nng/nng.h":
     int  nng_socket_peer_name (nng_socket, const char **) nogil
     int  nng_socket_raw       (nng_socket, bint *) nogil
 
+    const char* nng_str_sockaddr(const nng_sockaddr *, char *, size_t) nogil
+    uint32_t nng_sockaddr_port(const nng_sockaddr *) nogil
     bint nng_sockaddr_equal(const nng_sockaddr *, const nng_sockaddr *) nogil
+    uint64_t nng_sockaddr_hash(const nng_sockaddr *) nogil
 
     # ── Pipe events ───────────────────────────────────────────────────────────
     ctypedef int nng_pipe_ev

@@ -155,8 +155,25 @@ cdef class _AioSockASync:
         if fut is None or loop is None:
             return
 
-        assert loop == _get_running_loop(), "Event loop mismatch in _dispatch_complete"
+        try:
+            running_loop = _get_running_loop()
+        except RuntimeError:
+            running_loop = None
 
+        if loop != running_loop:
+            # Can occur only during _AioAsyncManager release(),
+            # when the manager cancels all in-flight ops and waits for them to finish.
+            self._future = fut
+            self._loop = loop
+            return self._dispatch_complete_safe()
+
+        # The trampoline might not have returned in some rare race cases,
+        # but also can occur during release() in which case the trampoline
+        # might not have been fired yet. In either case, we can still safely wait.
+        if nng_aio_busy(self._handle.get().get()):
+            nng_aio_wait(self._handle.get().get())
+
+        # Retrieve the result code once the aio is finished
         err = nng_aio_result(self._handle.get().get())
 
         # We are already on the event-loop thread (asserted above), so resolve
@@ -167,6 +184,39 @@ cdef class _AioSockASync:
         else:
             if not fut.done():
                 fut.set_exception(_err_from_code(err))
+
+    def _dispatch_complete_safe(self):
+        """Resolve the future; called by the dispatcher thread (GIL held) (or _AioAsyncManager release()).
+
+        nng_aio_result() is safe to call here: by the time the dispatcher runs
+        this, the callback has already returned and the result is stable.
+        """
+        cdef int err
+
+        fut  = self._future
+        loop = self._loop
+        self._future  = None
+        self._loop    = None
+
+        if fut is None or loop is None:
+            return
+
+        # The trampoline might not have returned in some rare race cases,
+        # but also can occur during release() in which case the trampoline
+        # might not have been fired yet. In either case, we can still safely wait.
+        if nng_aio_busy(self._handle.get().get()):
+            nng_aio_wait(self._handle.get().get())
+
+        # Retrieve the result code once the aio is finished
+        err = nng_aio_result(self._handle.get().get())
+
+        # asyncio mode: schedule on the event-loop thread.
+        # the asyncio recv methods retrieve the message themselves after await.
+        if err == NNG_OK:
+            loop.call_soon_threadsafe(_set_future_done, fut)
+        else:
+            loop.call_soon_threadsafe(
+                _set_future_exception, fut, _err_from_code(err))
 
     # ── Pre-submission helpers ────────────────────────────────────────────
 
@@ -356,32 +406,6 @@ cdef class _AioCbASync(_AioSockASync):
 
     # ── Part 2: dispatcher-thread completion handler ──────────────────────
 
-    def _dispatch_complete(self):
-        """Resolve the future; called by the dispatcher thread (GIL held).
-
-        nng_aio_result() is safe to call here: by the time the dispatcher runs
-        this, the callback has already returned and the result is stable.
-        """
-        cdef int err
-
-        fut  = self._future
-        loop = self._loop
-        self._future  = None
-        self._loop    = None
-
-        if fut is None or loop is None:
-            return
-
-        err = nng_aio_result(self._handle.get().get())
-
-        # asyncio mode: schedule on the event-loop thread.
-        # the asyncio recv methods retrieve the message themselves after await.
-        if err == NNG_OK:
-            loop.call_soon_threadsafe(_set_future_done, fut)
-        else:
-            loop.call_soon_threadsafe(
-                _set_future_exception, fut, _err_from_code(err))
-
 
     cdef int _prepare_submit(self):
         """Register the completion callable and keep op alive until dispatch.
@@ -391,7 +415,7 @@ cdef class _AioCbASync(_AioSockASync):
         global _DISPATCH_CALLABLES
 
         # Register the dispatch callable keyed by this object's address.
-        _DISPATCH_CALLABLES[id(self)] = self._dispatch_complete
+        _DISPATCH_CALLABLES[id(self)] = self._dispatch_complete_safe
         return 0
 
     cdef int _cancel_dispatch(self) noexcept:
@@ -440,16 +464,16 @@ cdef class _AioAsyncManager:
     Not thread-safe: all public methods must be called with the GIL held.
     """
 
-    cdef:
-        object _loop                        # asyncio event loop (strong ref)
-        int    _mode                        # _AIO_MGR_POLL / _PROACTOR / _FALLBACK
-        shared_ptr[IDispatchQueue] _queue   # POLL / PROACTOR modes
-        object _dispatch_callables          # dict  id(op) → callable
-        object _drain_task                  # asyncio.Task (PROACTOR mode)
-        object _drain_sock                  # socket.socket wrapper (PROACTOR mode)
-        bint   _releasing                   # True when release() initiated the cancel
-        bint   _task_user_cancelled         # True after user-cancelled drain task
-        int    _read_fd                     # POLL: fd registered with add_reader
+    cdef object _dispatch_callables          # dict  id(op) → callable
+    cdef object _drain_task                  # asyncio.Task (PROACTOR mode)
+    cdef object _drain_sock                  # socket.socket wrapper (PROACTOR mode)
+    cdef DCGMutex _lock                      # protects all fields
+    cdef object _loop                        # asyncio event loop (strong ref)
+    cdef int    _mode                        # _AIO_MGR_POLL / _PROACTOR / _FALLBACK
+    cdef shared_ptr[IDispatchQueue] _queue   # POLL / PROACTOR modes
+    cdef bint   _releasing                   # True when release() initiated the cancel
+    cdef bint   _task_user_cancelled         # True after user-cancelled drain task
+    cdef int    _read_fd                     # POLL: fd registered with add_reader
 
     def __cinit__(self):
         """Initialise all fields to safe defaults."""
@@ -495,6 +519,8 @@ cdef class _AioAsyncManager:
 
     cdef int _select_mode(self, object loop):
         """Choose and initialise the best available dispatch mode for *loop*."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
 
         # Windows ProactorEventLoop: socket-pair wakeup + drain task.
         if _ProactorEventLoop is not None and isinstance(loop, _ProactorEventLoop):
@@ -511,6 +537,9 @@ cdef class _AioAsyncManager:
 
     cdef bint _try_init_poll(self, object loop):
         """Attempt POLL mode initialisation; return True on success."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
+
         cdef int fd
         try:
             self._queue = make_poll_dispatch_queue()
@@ -531,6 +560,9 @@ cdef class _AioAsyncManager:
 
     cdef bint _try_init_proactor(self, object loop):
         """Attempt PROACTOR mode initialisation; return True on success."""
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
+
         import socket as _socket_module
         cdef int fd
         try:
@@ -578,6 +610,9 @@ cdef class _AioAsyncManager:
         Returns:
             A ready-to-submit :class:`_AioSockASync` (or subclass) instance.
         """
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
+
         if self._mode == _AIO_MGR_POLL:
             return _AioSockASync.create_for_socket(
                 anchor, self._queue, self._dispatch_callables)
@@ -595,6 +630,9 @@ cdef class _AioAsyncManager:
         Returns:
             A ready-to-submit :class:`_AioSockASync` (or subclass) instance.
         """
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
+
         if self._mode == _AIO_MGR_POLL:
             return _AioSockASync.create_for_context(
                 anchor, self._queue, self._dispatch_callables)
@@ -612,6 +650,9 @@ cdef class _AioAsyncManager:
         becomes readable.  Runs entirely on the event-loop thread, so
         completion handlers resolve futures directly (no cross-thread hop).
         """
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
+
         cdef deque[uint64_t] ready
 
         # Drain every wakeup byte so the fd is no longer readable.
@@ -620,16 +661,25 @@ cdef class _AioAsyncManager:
         # Collect all pending completions under a single mutex acquisition.
         self._queue.get().drain_ready(ready)
 
-        # Dispatch in FIFO order.  All callbacks run on the loop thread.
-        while not ready.empty():
-            op_id = ready.front()
-            ready.pop_front()
+        # If we are releasing and the dispatch callables dict has been cleared, skip dispatching.
+        if self._dispatch_callables is None:
+            return
+
+        # Retrieve all callbacks to call
+        callbacks = []
+        for op_id in ready:
             cb = self._dispatch_callables.pop(op_id, None)
             if cb is not None:
-                try:
-                    cb()
-                except BaseException:
-                    _print_exc()
+                callbacks.append(cb)
+
+        lock.unlock()
+
+        # Dispatch in FIFO order. All callbacks run on the loop thread.
+        for cb in callbacks:
+            try:
+                cb()
+            except BaseException:
+                _print_exc()
 
     # ── Proactor-mode drain task ───────────────────────────────────────────
 
@@ -646,23 +696,50 @@ cdef class _AioAsyncManager:
         :meth:`release`), ``_task_user_cancelled`` is set so that subsequent
         operations transparently fall back to :class:`_AioCbASync`.
         """
+        cdef unique_lock[DCGMutex] lock
+        cdef deque[uint64_t] ready
+
         cdef uint64_t op_id = 0
         try:
             while True:
+                # Release the lock while waiting for the wakeup to avoid blocking
+                lock_gil_friendly(lock, self._lock)
+                loop = self._loop
+                drain_sock = self._drain_sock
+                lock.unlock()
+
                 # Wait for at least one wakeup byte from the nng trampoline.
-                await self._loop.sock_recv(self._drain_sock, 32)
+                await loop.sock_recv(drain_sock, 32)
+
+                # Re-acquire the lock to access shared state and dispatch callbacks.
+                lock_gil_friendly(lock, self._lock)
 
                 # Drain any additional wakeup bytes that arrived concurrently.
                 self._queue.get().drain_wakeup()
+    
 
-                # Dispatch all pending completions.
-                while self._queue.get().get_ready(op_id):
+                # Collect all pending completions under a single mutex acquisition.
+                self._queue.get().drain_ready(ready)
+
+                # If we are releasing and the dispatch callables dict has been cleared, skip dispatching.
+                if self._dispatch_callables is None:
+                    return
+
+                # Retrieve all callbacks to call
+                callbacks = []
+                for op_id in ready:
                     cb = self._dispatch_callables.pop(op_id, None)
                     if cb is not None:
-                        try:
-                            cb()
-                        except BaseException:
-                            _print_exc()
+                        callbacks.append(cb)
+
+                lock.unlock()
+
+                # Dispatch all pending completions.
+                for cb in callbacks:
+                    try:
+                        cb()
+                    except BaseException:
+                        _print_exc()
 
         except _CancelledError:
             if not self._releasing:
@@ -680,28 +757,45 @@ cdef class _AioAsyncManager:
         references held by this manager.  After this call the manager must
         not be used to create new AIO operations.
         """
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            self._loop = None
-            return
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
 
-        # Schedule mode-specific cleanup on the event-loop thread.
-        if self._mode == _AIO_MGR_POLL and self._read_fd >= 0:
-            try:
-                loop.call_soon_threadsafe(loop.remove_reader, self._read_fd)
-            except Exception:
-                pass
-        elif self._mode == _AIO_MGR_PROACTOR:
-            task = self._drain_task
-            if task is not None and not task.done():
-                self._releasing = True
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            # Schedule mode-specific cleanup on the event-loop thread.
+            if self._mode == _AIO_MGR_POLL and self._read_fd >= 0:
                 try:
-                    loop.call_soon_threadsafe(task.cancel)
+                    loop.call_soon_threadsafe(loop.remove_reader, self._read_fd)
                 except Exception:
                     pass
+            elif self._mode == _AIO_MGR_PROACTOR:
+                task = self._drain_task
+                if task is not None and not task.done():
+                    self._releasing = True
+                    try:
+                        loop.call_soon_threadsafe(task.cancel)
+                    except Exception:
+                        pass
+
+        # Drain the dispatch queue to ensure no callbacks are still pending on the loop thread.
+        # Dispatch all pending completions.
+        # Note nng_sock_close has spawned all aio callbacks, but they
+        # may not have fired yet. Since they own the reference to their
+        # dispatch queue, we can release without waiting for them though.
+        dispatch_callables = list(self._dispatch_callables.values()) \
+            if self._dispatch_callables is not None else []
 
         # Drop strong references; C++ objects are cleaned up by shared_ptr.
         self._loop       = None
         self._drain_task = None
-        if self._dispatch_callables is not None:
-            self._dispatch_callables.clear()
+        self._dispatch_callables = None
+
+        lock.unlock()
+
+        # Call all the callbacks to resolve the futures
+        for cb in dispatch_callables:
+            if cb is not None:
+                try:
+                    cb()
+                except BaseException:
+                    _print_exc()

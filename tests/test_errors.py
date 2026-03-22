@@ -9,7 +9,8 @@ Organisation
 1.  Exception class hierarchy and NngError base
 2.  NngClosed  – all documented operations that raise after close
 3.  NngAgain   – non-blocking recv/send when not ready
-4.  NngTimeout – blocking recv with a short timeout
+4.  NngTimeout – recv_timeout and send_timeout across sync recv/send,
+    async arecv/asend, and submit_recv/submit_send
 5.  NngNotSupported – recv/send on one-directional sockets
 6.  NngAddressInUse – duplicate listener binding
 7.  NngConnectionRefused – blocking dial to a non-existent listener
@@ -21,6 +22,8 @@ Organisation
 Naming convention: every URL uses a unique suffix so tests are fully
 independent and run in any order (including in parallel).
 """
+import asyncio
+
 import pytest
 import nng
 from nng import (
@@ -432,6 +435,92 @@ class TestNngTimeout:
             with pytest.raises(NngTimeout):
                 fut.result(timeout=2.0)
 
+    @pytest.mark.asyncio
+    async def test_arecv_timeout(self):
+        """arecv() with short timeout and no sender → NngTimeout."""
+        with nng.PairSocket() as s:
+            s.recv_timeout = 50
+            s.add_listener(_url("tmo_arecv")).start()
+            with pytest.raises(NngTimeout):
+                await s.arecv()
+
+    @pytest.mark.asyncio
+    async def test_arecv_timeout_is_TimeoutError(self):
+        """arecv() NngTimeout is catchable as built-in TimeoutError."""
+        with nng.PairSocket() as s:
+            s.recv_timeout = 50
+            s.add_listener(_url("tmo_arecv_te")).start()
+            with pytest.raises(TimeoutError):
+                await s.arecv()
+
+    def test_send_timeout(self):
+        """send() with send_timeout and no available pipe → NngTimeout.
+
+        PushSocket with send_buf=0 has no local queue; with no PULL receiver
+        connected the first send blocks until send_timeout expires.
+        """
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_send")).start()
+            with pytest.raises(NngTimeout):
+                s.send(b"x")
+
+    def test_send_timeout_is_TimeoutError(self):
+        """send() NngTimeout is catchable as built-in TimeoutError."""
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_send_te")).start()
+            with pytest.raises(TimeoutError):
+                s.send(b"x")
+
+    def test_send_timeout_is_NngError(self):
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_send_ne")).start()
+            with pytest.raises(NngError):
+                s.send(b"x")
+
+    def test_send_timeout_code_is_set(self):
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_send_code")).start()
+            exc = pytest.raises(NngTimeout, s.send, b"x")
+            assert exc.value.code != 0
+
+    @pytest.mark.asyncio
+    async def test_asend_timeout(self):
+        """asend() with send_timeout and no available pipe → NngTimeout."""
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_asend")).start()
+            with pytest.raises(NngTimeout):
+                await s.asend(b"x")
+
+    @pytest.mark.asyncio
+    async def test_asend_timeout_is_TimeoutError(self):
+        """asend() NngTimeout is catchable as built-in TimeoutError."""
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_asend_te")).start()
+            with pytest.raises(TimeoutError):
+                await s.asend(b"x")
+
+    def test_submit_send_timeout_via_future(self):
+        """submit_send().result() raises NngTimeout when send_timeout expires."""
+        with nng.PushSocket() as s:
+            s.send_timeout = 50
+            s.send_buf = 0
+            s.add_listener(_url("tmo_sub_send")).start()
+            fut = s.submit_send(b"x")
+            with pytest.raises(NngTimeout):
+                fut.result(timeout=2.0)
+
 
 # =============================================================================
 # 5.  NngNotSupported – recv / send on one-directional sockets
@@ -750,6 +839,19 @@ class TestContextErrors:
             finally:
                 ctx.close()
 
+    @pytest.mark.asyncio
+    async def test_context_arecv_timeout(self):
+        """Context arecv() obeys the socket-level recv_timeout."""
+        with nng.RepSocket() as s:
+            s.recv_timeout = 50
+            s.add_listener(_url("ctx_arecv_atmo")).start()
+            ctx = s.open_context()
+            try:
+                with pytest.raises(NngTimeout):
+                    await ctx.arecv()
+            finally:
+                ctx.close()
+
 
 # =============================================================================
 # 11.  submit_recv / submit_send – future-based error propagation
@@ -797,3 +899,78 @@ class TestFutureErrors:
             fut = s.submit_recv()
             with pytest.raises(NngError):
                 fut.result(timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_arecv_raises_closed_when_socket_closed_concurrently(self):
+        """arecv() raises NngClosed when another task closes the socket mid-await.
+
+        Simulates the common asyncio pattern where a background task is blocked
+        on arecv() and the socket is closed from the main task, e.g. on shutdown.
+        """
+        s = nng.RepSocket()
+        s.add_listener(_url("fut_conc_close")).start()
+
+        async def _recv_task() -> None:
+            with pytest.raises(NngClosed):
+                await s.arecv()
+
+        task = asyncio.create_task(_recv_task())
+        # Yield to let _recv_task reach its await before we close.
+        await asyncio.sleep(0)
+        s.close()
+        await task
+
+
+# =============================================================================
+# 12.  recv_timeout / send_timeout property get/set correctness
+# =============================================================================
+
+
+class TestTimeoutProperties:
+    """Verify recv_timeout and send_timeout property semantics."""
+
+    def test_recv_timeout_default_is_minus_one(self):
+        """recv_timeout is -1 (infinite) by default."""
+        with nng.PairSocket() as s:
+            assert s.recv_timeout == -1
+
+    def test_recv_timeout_roundtrip(self):
+        """recv_timeout set then read back returns the same value."""
+        with nng.PairSocket() as s:
+            s.recv_timeout = 250
+            assert s.recv_timeout == 250
+
+    def test_recv_timeout_zero_means_poll(self):
+        """recv_timeout=0 causes recv() to return immediately with NngTimeout."""
+        with nng.PairSocket() as s:
+            s.recv_timeout = 0
+            s.add_listener(_url("tmo_prop_zero")).start()
+            with pytest.raises(NngTimeout):
+                s.recv()
+
+    def test_send_timeout_default_is_minus_one(self):
+        """send_timeout is -1 (infinite) by default."""
+        with nng.PairSocket() as s:
+            assert s.send_timeout == -1
+
+    def test_send_timeout_roundtrip(self):
+        """send_timeout set then read back returns the same value."""
+        with nng.PairSocket() as s:
+            s.send_timeout = 300
+            assert s.send_timeout == 300
+
+    def test_dialer_recv_timeout_readable(self):
+        """Dialer.recv_timeout is readable and defaults to -1 (inherit from socket).
+
+        The per-dialer timeout is configured at construction time in
+        ``Socket.add_dialer``; the property is read-only after creation.
+        """
+        with nng.PairSocket() as s:
+            d = s.add_dialer(_url("tmo_prop_dial_recv"))
+            assert d.recv_timeout == -1
+
+    def test_dialer_send_timeout_readable(self):
+        """Dialer.send_timeout is readable and defaults to -1 (inherit from socket)."""
+        with nng.PairSocket() as s:
+            d = s.add_dialer(_url("tmo_prop_dial_send"))
+            assert d.send_timeout == -1

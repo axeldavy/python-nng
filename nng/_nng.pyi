@@ -589,7 +589,18 @@ class Pipe:
         sends/receives on this pipe fail immediately.
 
         If a change callback is registered it fires when the close completes.
+
+        If a pipe is closed several times, only the first call has an effect.
+        Subsequent calls are no-ops.
         """
+        ...
+
+    def get_peer_addr(self) -> Any:
+        """Remote peer address."""
+        ...
+
+    def get_self_addr(self) -> Any:
+        """Local address."""
         ...
 
     def __eq__(self, value: Any) -> bool:

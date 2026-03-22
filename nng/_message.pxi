@@ -470,19 +470,23 @@ cdef class Message:
         self._check_validity()
 
         cdef nng_pipe p = self._handle.get_pipe()
+        cdef int pipe_id = nng_pipe_id(p)
+
         # Pipe closed or not set
-        if p.id == 0:
+        if pipe_id == 0:
             return None
 
         lock.unlock()   # release before touching Python structures
     
         # Fast path: pipe in registry (most common case when pipe is still alive)
-        pipe = _PIPE_REGISTRY.get(p.id, None)
+        pipe = _PIPE_REGISTRY.get(pipe_id, None)
         if pipe is not None:
             return pipe
 
+        cdef int socket_id = nng_socket_id(nng_pipe_socket(p))
+
         # Case where the pipe is not yet live
-        cdef Socket s = _SOCKET_REGISTRY.get(p.get_socket().id, None)
+        cdef Socket s = _SOCKET_REGISTRY.get(socket_id, None)
         if s is None:
             return None # If the socket is already closed, the pipe must be closed too, so return None
 
@@ -490,7 +494,7 @@ cdef class Message:
         s.update_pipes()
 
         # Retry
-        pipe = _PIPE_REGISTRY.get(p.id, None)
+        pipe = _PIPE_REGISTRY.get(pipe_id, None)
         if pipe is not None:
             return pipe
 

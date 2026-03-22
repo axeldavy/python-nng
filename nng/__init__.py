@@ -49,6 +49,7 @@ from nng._nng import (
     Dialer,
     Listener,
     Pipe,    PipeStatus,    TlsConfig,
+    SocketAddr,
 
     # ── Errors ───────────────────────────────────────────────────────────
     NngError,
@@ -90,7 +91,7 @@ __all__ = [
     "SurveyorSocket", "RespondentSocket",
     "BusSocket",
     # Types
-    "Message", "Context", "Dialer", "Listener", "Pipe", "PipeStatus", "TlsConfig",
+    "Message", "Context", "Dialer", "Listener", "Pipe", "PipeStatus", "TlsConfig", "SocketAddr",
     # Errors
     "NngError", "NngTimeout", "NngConnectionRefused", "NngClosed",
     "NngAgain", "NngNotSupported", "NngAddressInUse", "NngPermission",

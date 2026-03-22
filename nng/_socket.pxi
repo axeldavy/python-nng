@@ -15,12 +15,44 @@
 # BusSocket     – bus0
 
 from asyncio import get_running_loop as _get_running_loop
-from os import pipe
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from selectors import DefaultSelector as _DefaultSelector, EVENT_READ as _EVENT_READ
 import enum as _enum
 
 from libcpp.memory cimport shared_ptr
+
+# ─ Socket address ─────────────────────────────────────────────
+cdef class SocketAddr:
+    """Utility for converting nng_sockaddr to a URL string."""
+    cdef nng_sockaddr _sa
+
+    def __init__(self):
+        raise TypeError("SocketAddr cannot be instantiated directly")
+
+    @staticmethod
+    cdef SocketAddr create(nng_sockaddr sa):
+        cdef SocketAddr obj = SocketAddr.__new__(SocketAddr)
+        obj._sa = sa
+        return obj
+
+    @property
+    def port(self) -> int:
+        """Port number, or 0 if not applicable."""
+        return nng_sockaddr_port(&self._sa)
+
+    def __str__(self):
+        cdef char[NNG_MAXADDRSTRLEN+1] buffer
+        memset(buffer, 0, NNG_MAXADDRSTRLEN+1)
+        cdef bytes buf = nng_str_sockaddr(&self._sa, buffer, NNG_MAXADDRSTRLEN)
+        return buf.decode("utf-8")
+
+    def __hash__(self) -> int:
+        return nng_sockaddr_hash(&self._sa)
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, SocketAddr):
+            return NotImplemented
+        return nng_sockaddr_equal(&self._sa, &(<SocketAddr>other)._sa)
 
 # ── Pipe event trampoline (GIL-free) ─────────────────────────────────────────
 
@@ -166,6 +198,24 @@ cdef class Pipe:
         """The :class:`Listener` that accepted this pipe, or ``None``."""
         return self._weak_listener_ref() if self._weak_listener_ref is not None else None
 
+    def get_peer_addr(self) -> SocketAddr:
+        """Remote peer address."""
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+
+        cdef nng_sockaddr sa
+        check_err(self._handle.get().peer_addr(sa))
+        return SocketAddr.create(sa)
+
+    def get_self_addr(self) -> SocketAddr:
+        """Local address."""
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+
+        cdef nng_sockaddr sa
+        check_err(self._handle.get().self_addr(sa))
+        return SocketAddr.create(sa)
+
     cdef int handle_status_change(self):
         """Check the current status of this pipe and fire the callback if it has changed."""
         # Fail silently on invalid pipe
@@ -209,11 +259,18 @@ cdef class Pipe:
         sends/receives on this pipe fail immediately.
 
         If a change callback is registered it fires when the close completes.
+
+        If a pipe is closed several times, only the first call has an effect.
+        Subsequent calls are no-ops.
         """
         if not self._handle:
             raise RuntimeError("Invalid Pipe")
 
-        check_err(self._handle.get().close())
+        cdef int err = self._handle.get().close()
+
+        # Ignore expected errors from closing an already-closed pipe; raise unexpected ones.
+        if err not in (0, NNG_ECLOSED, NNG_ENOENT):
+            check_err(err)
 
         # Handle status change immediately
         self._handle_status_change_internal(NNG_PIPE_EV_REM_POST)

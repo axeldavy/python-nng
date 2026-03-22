@@ -150,6 +150,8 @@ RETURN_TYPES: dict[tuple[str | None, str], str] = {
     (None, "on_new_pipe"):  "None",
     (None, "subscribe"):    "None",
     (None, "unsubscribe"):  "None",
+    (None, "get_peer_addr"): "SocketAddr",
+    (None, "get_self_addr"): "SocketAddr",
     # TlsConfig fluent interface
     ("TlsConfig", "server_name"):   "TlsConfig",
     ("TlsConfig", "ca_chain"):      "TlsConfig",
@@ -188,6 +190,7 @@ PROP_TYPES: dict[tuple[str | None, str], str] = {
     (None, "polyamorous"):    "bool",
     (None, "resend_time"):    "int",
     (None, "survey_time"):    "int",
+    (None, "port"):           "int",
 }
 
 # Read-write properties: (class_name, prop_name).  All others are read-only.
@@ -664,6 +667,7 @@ def emit_pipe_status() -> list[str]:
 _CLASS_ORDER = [
     "Message",
     "TlsConfig",
+    "SocketAddr",
     "Pipe",
     "Dialer",
     "Listener",
