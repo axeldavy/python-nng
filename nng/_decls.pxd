@@ -414,6 +414,52 @@ cdef extern from "nng/nng.h":
     nng_err nng_init(const nng_init_params *) nogil
     void    nng_fini()                        nogil
 
+    # ── Options ─────────────────────────────────────────────────────────────
+
+    const char* NNG_OPT_RECVBUF
+    const char* NNG_OPT_SENDBUF
+    const char* NNG_OPT_RECVTIMEO
+    const char* NNG_OPT_SENDTIMEO
+    const char* NNG_OPT_LOCADDR
+    const char* NNG_OPT_MAXTTL
+    const char* NNG_OPT_RECVMAXSZ
+    const char* NNG_OPT_RECONNMINT
+    const char* NNG_OPT_RECONNMAXT
+    const char* NNG_OPT_TLS_VERIFIED
+    const char* NNG_OPT_TLS_PEER_CN
+    const char* NNG_OPT_TCP_NODELAY
+    const char* NNG_OPT_TCP_KEEPALIVE
+    const char* NNG_OPT_BOUND_PORT
+    const char* NNG_OPT_UDP_COPY_MAX
+    const char* NNG_OPT_IPC_PERMISSIONS
+    const char* NNG_OPT_PEER_UID
+    const char* NNG_OPT_IPC_PEER_UID
+    const char* NNG_OPT_PEER_GID
+    const char* NNG_OPT_IPC_PEER_GID
+    const char* NNG_OPT_PEER_PID
+    const char* NNG_OPT_IPC_PEER_PID
+    const char* NNG_OPT_PEER_ZONEID
+    const char* NNG_OPT_IPC_PEER_ZONEID
+    const char* NNG_OPT_WS_HEADER
+    const char* NNG_OPT_WS_HEADER_NEXT
+    const char* NNG_OPT_WS_HEADER_RESET
+    const char* NNG_OPT_WS_HEADER_KEY
+    const char* NNG_OPT_WS_HEADER_VALUE
+    const char* NNG_OPT_WS_REQUEST_URI
+    const char* NNG_OPT_WS_SENDMAXFRAME
+    const char* NNG_OPT_WS_RECVMAXFRAME
+    const char* NNG_OPT_WS_PROTOCOL
+    const char* NNG_OPT_WS_SEND_TEXT
+    const char* NNG_OPT_WS_RECV_TEXT
+    const char* NNG_OPT_SOCKET_FD
+    const char* NNG_OPT_LISTEN_FD
+    const char* NNG_OPT_PAIR1_POLY
+    const char* NNG_OPT_SUB_PREFNEW
+    const char* NNG_OPT_REQ_RESENDTIME
+    const char* NNG_OPT_REQ_RESENDTICK
+    const char* NNG_OPT_SURVEYOR_SURVEYTIME
+
+
     # ── TLS types ─────────────────────────────────────────────────────────────
     ctypedef int nng_tls_auth_mode
     int NNG_TLS_AUTH_MODE_NONE

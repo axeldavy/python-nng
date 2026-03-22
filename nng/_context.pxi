@@ -378,33 +378,95 @@ cdef class Context:
 
     @property
     def recv_timeout(self) -> int:
-        """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
+        """Receive timeout in ms (-1 = infinite, 0 = non-blocking).
+        
+        This affects all `recv`/`arecv`/`submit_recv` operations on this context,
+        regardless of pipe, starting from the time this option is modified.
+
+        Contexts inherit from the socket parameter at creation.
+        """
         self._check()
         cdef nng_duration v
-        check_err(nng_ctx_get_ms(self._handle.get().raw(), b"recv-timeout", &v))
+        check_err(nng_ctx_get_ms(self._handle.get().raw(), NNG_OPT_RECVTIMEO, &v))
         return v
 
     @recv_timeout.setter
     def recv_timeout(self, int ms):
         self._check()
-        check_err(nng_ctx_set_ms(self._handle.get().raw(), b"recv-timeout", ms))
+        check_err(nng_ctx_set_ms(self._handle.get().raw(), NNG_OPT_RECVTIMEO, ms))
 
     @property
     def send_timeout(self) -> int:
-        """Send timeout in ms."""
+        """Send timeout in ms (-1 = infinite, 0 = non-blocking).
+
+        This affects all `send`/`asend`/`submit_send` operations on this context, regardless of pipe,
+        starting from the time this option is modified.
+
+        Contexts inherit from the socket parameter at creation.
+        """
         self._check()
         cdef nng_duration v
-        check_err(nng_ctx_get_ms(self._handle.get().raw(), b"send-timeout", &v))
+        check_err(nng_ctx_get_ms(self._handle.get().raw(), NNG_OPT_SENDTIMEO, &v))
         return v
 
     @send_timeout.setter
     def send_timeout(self, int ms):
         self._check()
-        check_err(nng_ctx_set_ms(self._handle.get().raw(), b"send-timeout", ms))
+        check_err(nng_ctx_set_ms(self._handle.get().raw(), NNG_OPT_SENDTIMEO, ms))
 
     def __repr__(self) -> str:
         cdef bint is_open = self._handle.get() != NULL and self._handle.get().is_open()
         return f"Context(id={nng_ctx_id(self._handle.get().raw()) if is_open else 0}, open={is_open})"
+
+
+
+cdef class ReqContext(Context):
+    """Independent REQ context on a :class:`ReqSocket`.
+
+    REQ contexts have an independent send-receive state machine from their
+    parent socket, allowing multiple concurrent requests.
+    """
+
+    @staticmethod
+    cdef ReqContext open(Socket socket):
+        """Open a new context on *socket* and return a ReqContext wrapping it."""
+        cdef int err = 0
+        cdef shared_ptr[ContextHandle] ch = make_context(socket._handle, err)
+        check_err(err)
+        cdef ReqContext ctx = ReqContext.__new__(ReqContext)
+        ctx._handle = ch
+        return ctx
+
+    @property
+    def resend_time(self) -> int:
+        """How long (ms) to wait for a reply before resending the request.
+
+        Requests are automatically resent if the peer disconnects.
+
+        resend_time adds a timer at which requests will be resent (even if no
+        disconnection has been detected) to the peer until a reply is received.
+    
+        ``-1`` (the default) disables automatic resending (exception on disconnect)
+        Setting a positive value provides automatic fault-tolerance when working with
+        multiple REP peers, or possible packet loss. However it has the drawback
+        of causing a pipe connection loss upon receiving a reply of the previous
+        request after the resend timer has fired.
+
+        Setting a < 1000ms resend_time requires tuning the socket `resend_tick`
+        attribute to have real effect.
+
+        Contexts inherit from the socket parameter at creation.
+        """
+        self._check()
+        cdef nng_duration v
+        check_err(nng_ctx_get_ms(self._handle.get().raw(), NNG_OPT_REQ_RESENDTIME, &v))
+        return v
+
+    @resend_time.setter
+    def resend_time(self, int ms):
+        self._check()
+        check_err(nng_ctx_set_ms(self._handle.get().raw(), NNG_OPT_REQ_RESENDTIME, ms))
+
 
 cdef class SubContext(Context):
     """Independent sub context on a :class:`SubSocket`.
@@ -424,10 +486,59 @@ cdef class SubContext(Context):
         ctx._handle = ch
         return ctx
 
+    @property
+    def recv_buf(self) -> int:
+        """Receive buffer depth (number of queued messages).
+        
+        Unlike other protocols, the SUB protocol enables a per context
+        receive buffer depth, which limits the number of messages that can be
+        queued for the subscriptions associated with this context.
+
+        If the buffer is full, new messages are dropped according to
+        the skip_older_on_full_queue policy.
+
+        The default value is the one configured on the parent socket at the
+        time of the socket creation (which is 128 by default).
+        """
+        self._check()
+        cdef int v
+        check_err(nng_ctx_get_int(self._handle.get().raw(), b"recv-buffer", &v))
+        return v
+
+    @recv_buf.setter
+    def recv_buf(self, int n):
+        self._check()
+        check_err(nng_ctx_set_int(self._handle.get().raw(), b"recv-buffer", n))
+
+    @property
+    def skip_older_on_full_queue(self) -> bool:
+        """Whether to drop older messages when the receive queue is full.
+
+        If True, when the receive queue is full, newer messages are kept and
+        older unread messages are dropped.  Setting this option to ``False``
+        reverses that behavior: older messages are kept and newer messages are
+        dropped instead.
+
+        The default value is the one configured on the parent socket at the
+        time of the socket creation (which is True by default).
+        """
+        self._check()
+        cdef cpp_bool v
+        check_err(nng_ctx_get_bool(self._handle.get().raw(), NNG_OPT_SUB_PREFNEW, &v))
+        return bool(v)
+
+    @skip_older_on_full_queue.setter
+    def skip_older_on_full_queue(self, bint skip_older):
+        self._check()
+        check_err(nng_ctx_set_bool(self._handle.get().raw(), NNG_OPT_SUB_PREFNEW, skip_older))
+
     def subscribe(self, prefix: bytes = b"") -> None:
         """Subscribe to messages whose body starts with *prefix*.
 
         An empty prefix subscribes to all messages.
+
+        Contexts do not inherit from the socket parameter at creation,
+        and start with an empty subscription set (no messages).
         """
         self._check()
         cdef const unsigned char[::1] mv = prefix
@@ -447,3 +558,43 @@ cdef class SubContext(Context):
             self._handle.get().raw(),
             &mv[0] if len(mv) else NULL, len(mv))
         )
+
+
+
+cdef class SurveyorContext(Context):
+    """Independent surveyor context on a :class:`SurveyorSocket`.
+
+    Surveyor contexts have an independant survey_time parameter as their
+    parent socket.
+    """
+
+    @staticmethod
+    cdef SurveyorContext open(Socket socket):
+        """Open a new context on *socket* and return a SurveyorContext wrapping it."""
+        cdef int err = 0
+        cdef shared_ptr[ContextHandle] ch = make_context(socket._handle, err)
+        check_err(err)
+        cdef SurveyorContext ctx = SurveyorContext.__new__(SurveyorContext)
+        ctx._handle = ch
+        return ctx
+
+
+    @property
+    def survey_time(self) -> int:
+        """Survey deadline in milliseconds.
+
+        After sending a survey, the socket accepts responses for this long.
+        Once the deadline expires, :meth:`recv` raises :exc:`NngError` with
+        ``NngTimeout``.  The next :meth:`send` starts a fresh survey.
+
+        Contexts inherit from the socket parameter at creation.
+        """
+        self._check()
+        cdef nng_duration v
+        check_err(nng_ctx_get_ms(self._handle.get().raw(), NNG_OPT_SURVEYOR_SURVEYTIME, &v))
+        return v
+
+    @survey_time.setter
+    def survey_time(self, int ms):
+        self._check()
+        check_err(nng_ctx_set_ms(self._handle.get().raw(), NNG_OPT_SURVEYOR_SURVEYTIME, ms))

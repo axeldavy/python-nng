@@ -18,8 +18,8 @@ cdef class Dialer:
     to initiate the connection).
 
     All configuration options (TLS, reconnect intervals, timeouts) are set
-    via :meth:`Socket.add_dialer` before the dialer is started.  Once
-    :meth:`start` is called, the dialer's configuration is **locked** and
+    via :meth:`Socket.add_dialer` before the dialer is started.
+    The dialer's configuration is **locked** and
     individual options can no longer be changed.
 
     .. note::
@@ -110,10 +110,6 @@ cdef class Dialer:
     @property
     def recv_timeout(self) -> int:
         """Per-dialer receive timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-
-        Overrides the socket-level ``recv_timeout`` for pipes created by this
-        dialer.  Configured at construction time via :meth:`Socket.add_dialer`.
-
         Raises
         ------
         NngClosed
@@ -121,7 +117,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        cdef int rv = self._handle.get_ms(b"recv-timeout", &v)
+        cdef int rv = self._handle.get_recv_timeout_ms(&v)
         if rv == NNG_ENOENT: # see start()
             rv = NNG_ECLOSED
         check_err(rv)
@@ -131,9 +127,6 @@ cdef class Dialer:
     def send_timeout(self) -> int:
         """Per-dialer send timeout in milliseconds (-1 = infinite, 0 = non-blocking).
 
-        Overrides the socket-level ``send_timeout`` for pipes created by this
-        dialer.  Configured at construction time via :meth:`Socket.add_dialer`.
-
         Raises
         ------
         NngClosed
@@ -141,7 +134,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        cdef int rv = self._handle.get_ms(b"send-timeout", &v)
+        cdef int rv = self._handle.get_send_timeout_ms(&v)
         if rv == NNG_ENOENT: # see start()
             rv = NNG_ECLOSED
         check_err(rv)
@@ -163,7 +156,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        cdef int rv = self._handle.get_ms(b"reconnect-time-min", &v)
+        cdef int rv = self._handle.get_reconnect_time_min_ms(&v)
         if rv == NNG_ENOENT: # see start()
             rv = NNG_ECLOSED
         check_err(rv)
@@ -184,7 +177,7 @@ cdef class Dialer:
         """
         self._check()
         cdef nng_duration v
-        cdef int rv = self._handle.get_ms(b"reconnect-time-max", &v)
+        cdef int rv = self._handle.get_reconnect_time_max_ms(&v)
         if rv == NNG_ENOENT: # see start()
             rv = NNG_ECLOSED
         check_err(rv)

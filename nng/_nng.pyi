@@ -529,6 +529,49 @@ class TlsConfig:
         ...
 
 
+class SocketAddr:
+    """Utility for converting nng_sockaddr to a URL string."""
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
+    @property
+    def port(self) -> int:
+        """Port number, or 0 if not applicable."""
+        ...
+
+    def __eq__(self, value: Any) -> bool:
+        """Return self==value."""
+        ...
+
+    def __ge__(self, value: Any) -> Any:
+        """Return self>=value."""
+        ...
+
+    def __gt__(self, value: Any) -> Any:
+        """Return self>value."""
+        ...
+
+    def __hash__(self) -> int:
+        """Return hash(self)."""
+        ...
+
+    def __le__(self, value: Any) -> Any:
+        """Return self<=value."""
+        ...
+
+    def __lt__(self, value: Any) -> Any:
+        """Return self<value."""
+        ...
+
+    def __ne__(self, value: Any) -> bool:
+        """Return self!=value."""
+        ...
+
+    def __str__(self) -> str:
+        """Return str(self)."""
+        ...
+
+
 class Pipe:
     """
     Non-owning wrapper for a single nng pipe (physical connection).
@@ -595,11 +638,11 @@ class Pipe:
         """
         ...
 
-    def get_peer_addr(self) -> Any:
+    def get_peer_addr(self) -> SocketAddr:
         """Remote peer address."""
         ...
 
-    def get_self_addr(self) -> Any:
+    def get_self_addr(self) -> SocketAddr:
         """Local address."""
         ...
 
@@ -657,8 +700,8 @@ class Dialer:
     to initiate the connection).
 
     All configuration options (TLS, reconnect intervals, timeouts) are set
-    via :meth:`Socket.add_dialer` before the dialer is started.  Once
-    :meth:`start` is called, the dialer's configuration is **locked** and
+    via :meth:`Socket.add_dialer` before the dialer is started.
+    The dialer's configuration is **locked** and
     individual options can no longer be changed.
 
     .. note::
@@ -727,10 +770,6 @@ class Dialer:
     def recv_timeout(self) -> int:
         """
         Per-dialer receive timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-
-        Overrides the socket-level ``recv_timeout`` for pipes created by this
-        dialer.  Configured at construction time via :meth:`Socket.add_dialer`.
-
         Raises
         ------
         NngClosed
@@ -742,9 +781,6 @@ class Dialer:
     def send_timeout(self) -> int:
         """
         Per-dialer send timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-
-        Overrides the socket-level ``send_timeout`` for pipes created by this
-        dialer.  Configured at construction time via :meth:`Socket.add_dialer`.
 
         Raises
         ------
@@ -836,8 +872,8 @@ class Listener:
     :meth:`start` to begin accepting connections).
 
     All configuration options (TLS, per-pipe timeouts) are set via
-    :meth:`Socket.add_listener` before the listener is started.  Once
-    :meth:`start` is called, the listener's configuration is **locked** and
+    :meth:`Socket.add_listener` before the listener is created.  Once
+    created the listener's configuration is **locked** and
     individual options can no longer be changed.
 
     .. note::
@@ -852,11 +888,11 @@ class Listener:
     The properties on this class are **read-only** and exist solely for
     inspection after the fact.
 
-    Use as a context manager to stop and clean up the listener::
-
-        with sock.add_listener("tcp://0.0.0.0:5555", recv_timeout=5000) as lst:
-            lst.start()
-            ...
+    Special behaviours:
+        - Setting port 0 in a tcp url causes the listener to bind to an ephemeral port. The actual port
+            can then be retrieved from the listener's address property after start() returns. This is a common
+            technique for service discovery when combined with an out-of-band mechanism to share the port number
+            with clients (e.g. a well-known "discovery" socket or an external service registry).
     """
     @property
     def id(self) -> int:
@@ -866,6 +902,20 @@ class Listener:
     @property
     def pipes(self) -> list[Pipe]:
         """The active :class:`Pipe`(s) for this listener."""
+        ...
+
+    @property
+    def port(self) -> int:
+        """
+        The local port this listener is bound to, or 0 if not a TCP listener.
+
+        For TCP listeners, this is the actual port number the listener is bound
+        to. For non-TCP listeners, this property always returns 0.
+
+        Note that for TCP listeners configured with port 0, the actual port is
+        assigned by the OS at bind time and can be retrieved from this property
+        after :meth:`start` returns.
+        """
         ...
 
     @property
@@ -975,14 +1025,28 @@ class Context:
 
     @property
     def recv_timeout(self) -> int:
-        """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
+        """
+        Receive timeout in ms (-1 = infinite, 0 = non-blocking).
+
+        This affects all `recv`/`arecv`/`submit_recv` operations on this context,
+        regardless of pipe, starting from the time this option is modified.
+
+        Contexts inherit from the socket parameter at creation.
+        """
         ...
     @recv_timeout.setter
     def recv_timeout(self, value: int) -> None: ...
 
     @property
     def send_timeout(self) -> int:
-        """Send timeout in ms."""
+        """
+        Send timeout in ms (-1 = infinite, 0 = non-blocking).
+
+        This affects all `send`/`asend`/`submit_send` operations on this context, regardless of pipe,
+        starting from the time this option is modified.
+
+        Contexts inherit from the socket parameter at creation.
+        """
         ...
     @send_timeout.setter
     def send_timeout(self, value: int) -> None: ...
@@ -1163,13 +1227,6 @@ class Socket:
         ...
 
     @property
-    def recv_buf(self) -> int:
-        """Receive buffer depth (number of queued messages)."""
-        ...
-    @recv_buf.setter
-    def recv_buf(self, value: int) -> None: ...
-
-    @property
     def recv_fd(self) -> int:
         """
         Readable file descriptor for external poll / epoll / kqueue.
@@ -1181,24 +1238,28 @@ class Socket:
 
     @property
     def recv_max_size(self) -> int:
-        """Maximum incoming message size in bytes (0 = no limit)."""
+        """
+        Maximum incoming message size in bytes (0 = no limit).
+
+        Message beyond the limit will be discarded.
+        """
         ...
     @recv_max_size.setter
     def recv_max_size(self, value: int) -> None: ...
 
     @property
     def recv_timeout(self) -> int:
-        """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
+        """
+        Receive timeout in ms (-1 = infinite, 0 = non-blocking).
+
+        This affects all `recv`/`arecv`/`submit_recv` operations on this socket, regardless of pipe,
+        starting from the time this option is modified.
+
+        Contexts inherit from this parameter at creation.
+        """
         ...
     @recv_timeout.setter
     def recv_timeout(self, value: int) -> None: ...
-
-    @property
-    def send_buf(self) -> int:
-        """Send buffer depth (number of queued messages)."""
-        ...
-    @send_buf.setter
-    def send_buf(self, value: int) -> None: ...
 
     @property
     def send_fd(self) -> int:
@@ -1211,7 +1272,14 @@ class Socket:
 
     @property
     def send_timeout(self) -> int:
-        """Send timeout in ms."""
+        """
+        Send timeout in ms (-1 = infinite, 0 = non-blocking).
+
+        This affects all `send`/`asend`/`submit_send` operations on this socket, regardless of pipe,
+        starting from the time this option is modified.
+
+        Contexts inherit from this parameter at creation.
+        """
         ...
     @send_timeout.setter
     def send_timeout(self, value: int) -> None: ...
@@ -1501,7 +1569,41 @@ class PairSocket(Socket):
     v0:
         Use the older Pair v0 protocol instead of the default v1.
     """
-    ...
+    @property
+    def recv_buf(self) -> int:
+        """
+        Receive buffer depth (number of queued messages) before blocking.
+
+        The Pair protocol blocks sending messages on the other side until
+        the message can be received successfully into the queue.
+
+        A value of 0 (the default) means no buffering, i.e. any unqueued send
+        on the other side is blocked until this side does a receive operation.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @recv_buf.setter
+    def recv_buf(self, value: int) -> None: ...
+
+    @property
+    def send_buf(self) -> int:
+        """
+        Send buffer depth (number of queued messages) before blocking.
+
+        When non zero, messages are queues to a send buffer until the
+        recepient side can receive them.  When the buffer is full, the sender blocks
+        until space is available. 0 means no buffering, i.e. the sender blocks until
+        the message can be received.
+
+        The default for Pair is 0.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @send_buf.setter
+    def send_buf(self, value: int) -> None: ...
+
 
 class PubSocket(Socket):
     """
@@ -1520,7 +1622,22 @@ class PubSocket(Socket):
       messages for that subscriber are dropped when its send buffer is full.
     * PubSocket cannot receive; :meth:`recv` raises ``NngNotSupported``.
     """
-    ...
+    @property
+    def send_buf(self) -> int:
+        """
+        Send buffer depth (number of queued messages) before dropping messages.
+
+        The send queue enables to queue messages, enabling recipients time to
+        receive all of them. When the buffer is full, older messages are dropped and
+        cannot be received anymore by the subscribers.
+        The default is 16 for Pub.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @send_buf.setter
+    def send_buf(self, value: int) -> None: ...
+
 
 class SubSocket(Socket):
     """
@@ -1551,7 +1668,23 @@ class SubSocket(Socket):
         msg = sub.recv()
     """
     @property
-    def skip_older_on_full_queue(self) -> Any:
+    def recv_buf(self) -> int:
+        """
+        Receive buffer depth (number of queued messages) before dropping messages.
+
+        If the buffer is full, new messages are dropped according to
+        the skip_older_on_full_queue policy.
+
+        The default value is 128.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @recv_buf.setter
+    def recv_buf(self, value: int) -> None: ...
+
+    @property
+    def skip_older_on_full_queue(self) -> bool:
         """
         Whether to drop older messages when the receive queue is full.
 
@@ -1561,6 +1694,8 @@ class SubSocket(Socket):
         dropped instead.
         """
         ...
+    @skip_older_on_full_queue.setter
+    def skip_older_on_full_queue(self, value: bool) -> None: ...
 
     def open_context(self) -> Context:
         """Open an independent sub context on this socket."""
@@ -1611,7 +1746,7 @@ class ReqSocket(Socket):
     be in-flight on a different pipe simultaneously.
     """
     @property
-    def resend_tick(self) -> Any:
+    def resend_tick(self) -> int:
         """
         How often (ms) to check for timed-out requests to resend.
 
@@ -1621,6 +1756,8 @@ class ReqSocket(Socket):
         The default is 1000 ms.
         """
         ...
+    @resend_tick.setter
+    def resend_tick(self, value: int) -> None: ...
 
     @property
     def resend_time(self) -> int:
@@ -1634,7 +1771,9 @@ class ReqSocket(Socket):
 
         ``-1`` (the default) disables automatic resending (exception on disconnect)
         Setting a positive value provides automatic fault-tolerance when working with
-        multiple REP peers, or possible packet loss.
+        multiple REP peers, or possible packet loss. However it has the drawback
+        of causing a pipe connection loss upon receiving a reply of the previous
+        request after the resend timer has fired.
 
         Setting a < 1000ms resend_time requires tuning :attr:`resend_tick` to
         have real effect.
@@ -1704,19 +1843,24 @@ class PushSocket(Socket):
       reliable delivery is required, consider :class:`ReqSocket` instead.
     """
     @property
-    def send_buffer_length(self) -> Any:
+    def send_buf(self) -> int:
         """
-        Maximum number of messages that can be buffered for sending to a peer.
+        Send buffer depth (number of queued messages) before blocking.
+
+        When non zero, messages are queues to a send buffer until the
+        recepient side can receive them.  When the buffer is full, the sender blocks
+        until space is available.
 
         Default (0), means operations are unbuffers, and sending will block
         until a peer is available to receive the message.
 
-        Setting a positive value queues to an intermediate buffer of that many
-        messages.
+        The default for Push is 0.
 
-        The maximum value is 8192.
+        This value must be an integer between 0 and 8192, inclusive.
         """
         ...
+    @send_buf.setter
+    def send_buf(self, value: int) -> None: ...
 
 
 class PullSocket(Socket):
@@ -1759,6 +1903,41 @@ class SurveyorSocket(Socket):
     each context maintains its own deadline and does not cancel surveys on
     other contexts.
     """
+    @property
+    def recv_buf(self) -> int:
+        """
+        Receive buffer depth (number of queued messages) before blocking/dropping.
+
+        The blocking or dropping behavior depends on the protocol.
+
+        The default is 128 for Surveyor.
+
+        A value of 0 means no buffering. The socket will block or drop (depending
+        on protocol) messages until the message can be received successfully
+        from at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @recv_buf.setter
+    def recv_buf(self, value: int) -> None: ...
+
+    @property
+    def send_buf(self) -> int:
+        """
+        Send buffer depth (number of queued messages) before blocking.
+
+        The default is 8 for Surveyor.
+
+        A value of 0 means no buffering; the socket will block until the message
+        can be sent successfully to at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @send_buf.setter
+    def send_buf(self, value: int) -> None: ...
+
     @property
     def survey_time(self) -> int:
         """
@@ -1824,7 +2003,41 @@ class BusSocket(Socket):
        discarded without affecting other peers.  The protocol is not suitable
        for high-throughput workloads where loss would be unacceptable.
     """
-    ...
+    @property
+    def recv_buf(self) -> int:
+        """
+        Receive buffer depth (number of queued messages) before blocking/dropping.
+
+        The blocking or dropping behavior depends on the protocol.
+
+        The default is 16 for Bus
+
+        A value of 0 means no buffering. The socket will block or drop (depending
+        on protocol) messages until the message can be received successfully
+        from at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @recv_buf.setter
+    def recv_buf(self, value: int) -> None: ...
+
+    @property
+    def send_buf(self) -> int:
+        """
+        Send buffer depth (number of queued messages) before blocking.
+
+        The default is 16 for Bus.
+
+        A value of 0 means no buffering; the socket will block until the message
+        can be sent successfully to at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        ...
+    @send_buf.setter
+    def send_buf(self, value: int) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Module-level constants

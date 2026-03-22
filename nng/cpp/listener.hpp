@@ -57,11 +57,21 @@ public:
 
     int id() const noexcept { return nng_listener_id(_l); }
 
-    int get_ms(const char* opt, nng_duration* v) const noexcept {
-        return nng_listener_get_ms(_l, opt, v);
+    int get_port(int *port) const noexcept {
+        return nng_listener_get_int(_l, NNG_OPT_BOUND_PORT, port);
     }
-    int set_ms(const char* opt, nng_duration v) noexcept {
-        return nng_listener_set_ms(_l, opt, v);
+    int get_recv_timeout_ms(nng_duration* v) const noexcept {
+        return nng_listener_get_ms(_l, NNG_OPT_RECVTIMEO, v);
+    }
+    int get_send_timeout_ms(nng_duration* v) const noexcept {
+        return nng_listener_get_ms(_l, NNG_OPT_SENDTIMEO, v);
+    }
+
+    int set_recv_timeout_ms(nng_duration v) noexcept {
+        return nng_listener_set_ms(_l, NNG_OPT_RECVTIMEO, v);
+    }
+    int set_send_timeout_ms(nng_duration v) noexcept {
+        return nng_listener_set_ms(_l, NNG_OPT_SENDTIMEO, v);
     }
     int set_tls(nng_tls_config* cfg) noexcept {
         return nng_listener_set_tls(_l, cfg);

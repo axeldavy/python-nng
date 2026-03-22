@@ -18,8 +18,8 @@ cdef class Listener:
     :meth:`start` to begin accepting connections).
 
     All configuration options (TLS, per-pipe timeouts) are set via
-    :meth:`Socket.add_listener` before the listener is started.  Once
-    :meth:`start` is called, the listener's configuration is **locked** and
+    :meth:`Socket.add_listener` before the listener is created.  Once
+    created the listener's configuration is **locked** and
     individual options can no longer be changed.
 
     .. note::
@@ -34,11 +34,11 @@ cdef class Listener:
     The properties on this class are **read-only** and exist solely for
     inspection after the fact.
 
-    Use as a context manager to stop and clean up the listener::
-
-        with sock.add_listener("tcp://0.0.0.0:5555", recv_timeout=5000) as lst:
-            lst.start()
-            ...
+    Special behaviours:
+        - Setting port 0 in a tcp url causes the listener to bind to an ephemeral port. The actual port
+            can then be retrieved from the listener's address property after start() returns. This is a common
+            technique for service discovery when combined with an out-of-band mechanism to share the port number
+            with clients (e.g. a well-known "discovery" socket or an external service registry).
     """
 
     cdef ListenerHandle _handle
@@ -108,6 +108,22 @@ cdef class Listener:
     # ── Options (read-only; set via Socket.add_listener) ────────────────────
 
     @property
+    def port(self) -> int:
+        """The local port this listener is bound to, or 0 if not a TCP listener.
+
+        For TCP listeners, this is the actual port number the listener is bound
+        to. For non-TCP listeners, this property always returns 0.
+
+        Note that for TCP listeners configured with port 0, the actual port is
+        assigned by the OS at bind time and can be retrieved from this property
+        after :meth:`start` returns.
+        """
+        self._check()
+        cdef int port = 0
+        check_err(self._handle.get_port(&port))
+        return port
+
+    @property
     def recv_timeout(self) -> int:
         """Per-listener receive timeout in milliseconds (-1 = infinite, 0 = non-blocking).
 
@@ -121,7 +137,7 @@ cdef class Listener:
         """
         self._check()
         cdef nng_duration v
-        cdef int rv = self._handle.get_ms(b"recv-timeout", &v)
+        cdef int rv = self._handle.get_recv_timeout_ms(&v)
         if rv == NNG_ENOENT: # see start()
             rv = NNG_ECLOSED
         check_err(rv)
@@ -141,7 +157,7 @@ cdef class Listener:
         """
         self._check()
         cdef nng_duration v
-        cdef int rv = self._handle.get_ms(b"send-timeout", &v)
+        cdef int rv = self._handle.get_send_timeout_ms(&v)
         if rv == NNG_ENOENT: # see start()
             rv = NNG_ECLOSED
         check_err(rv)

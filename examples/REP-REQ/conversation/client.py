@@ -78,7 +78,6 @@ async def run_session(
         step_delay: Optional sleep between steps to interleave with other sessions.
     """
     with nng.ReqSocket() as sock:
-        sock.resend_time
         sock.add_dialer(url).start()
 
         _LOG.info("[%s] connected", name)

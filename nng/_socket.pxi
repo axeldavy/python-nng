@@ -21,6 +21,13 @@ import enum as _enum
 
 from libcpp.memory cimport shared_ptr
 
+"""
+TODO options:
+NNG_OPT_URL (dialer/listener/pipe): canonified transport url
+
+NNG_OPT_LOCADDR (listener/dialer)
+NNG_OPT_TCP_NODELAY and NNG_OPT_TCP_KEEPALIVE (dialer/listener)
+"""
 
 # ─ Socket address ─────────────────────────────────────────────
 cdef class SocketAddr:
@@ -639,68 +646,57 @@ cdef class Socket:
 
     @property
     def recv_timeout(self) -> int:
-        """Receive timeout in ms (-1 = infinite, 0 = non-blocking)."""
+        """Receive timeout in ms (-1 = infinite, 0 = non-blocking).
+        
+        This affects all `recv`/`arecv`/`submit_recv` operations on this socket, regardless of pipe,
+        starting from the time this option is modified.
+
+        Contexts inherit from this parameter at creation.
+        """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._handle.get().raw(), b"recv-timeout", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), NNG_OPT_RECVTIMEO, &v))
         return v
 
     @recv_timeout.setter
     def recv_timeout(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._handle.get().raw(), b"recv-timeout", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_RECVTIMEO, ms))
 
     @property
     def send_timeout(self) -> int:
-        """Send timeout in ms."""
+        """Send timeout in ms (-1 = infinite, 0 = non-blocking).
+
+        This affects all `send`/`asend`/`submit_send` operations on this socket, regardless of pipe,
+        starting from the time this option is modified.
+
+        Contexts inherit from this parameter at creation.
+        """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._handle.get().raw(), b"send-timeout", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), NNG_OPT_SENDTIMEO, &v))
         return v
 
     @send_timeout.setter
     def send_timeout(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._handle.get().raw(), b"send-timeout", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_SENDTIMEO, ms))
 
     @property
-    def recv_buf(self) -> int:
-        """Receive buffer depth (number of queued messages)."""
-        self._check()
-        cdef int v
-        check_err(nng_socket_get_int(self._handle.get().raw(), b"recv-buffer", &v))
-        return v
-
-    @recv_buf.setter
-    def recv_buf(self, int n):
-        self._check()
-        check_err(nng_socket_set_int(self._handle.get().raw(), b"recv-buffer", n))
-
-    @property
-    def send_buf(self) -> int:
-        """Send buffer depth (number of queued messages)."""
-        self._check()
-        cdef int v
-        check_err(nng_socket_get_int(self._handle.get().raw(), b"send-buffer", &v))
-        return v
-
-    @send_buf.setter
-    def send_buf(self, int n):
-        self._check()
-        check_err(nng_socket_set_int(self._handle.get().raw(), b"send-buffer", n))
-
-    @property
-    def recv_max_size(self) -> int:
-        """Maximum incoming message size in bytes (0 = no limit)."""
+    def recv_max_size(self) -> int: # TODO: doc says setting at socket level is depreciated and should move to dialer/listener at creation
+        """Maximum incoming message size in bytes (0 = no limit).
+        
+        Message beyond the limit will be discarded.
+        """
         self._check()
         cdef size_t v
-        check_err(nng_socket_get_size(self._handle.get().raw(), b"recv-size-max", &v))
+        check_err(nng_socket_get_size(self._handle.get().raw(), NNG_OPT_RECVMAXSZ, &v))
         return v
 
     @recv_max_size.setter
     def recv_max_size(self, size_t n):
         self._check()
-        check_err(nng_socket_set_size(self._handle.get().raw(), b"recv-size-max", n))
+        check_err(nng_socket_set_size(self._handle.get().raw(), NNG_OPT_RECVMAXSZ, n))
 
     @property
     def recv_fd(self) -> int:
@@ -808,13 +804,13 @@ cdef class Socket:
         if tls is not None:
             check_err(dh.set_tls((<TlsConfig?>tls)._get_ptr()))
         if reconnect_min_ms is not None:
-            check_err(dh.set_ms(b"reconnect-time-min", reconnect_min_ms))
+            check_err(dh.set_reconnect_time_min_ms(reconnect_min_ms))
         if reconnect_max_ms is not None:
-            check_err(dh.set_ms(b"reconnect-time-max", reconnect_max_ms))
+            check_err(dh.set_reconnect_time_max_ms(reconnect_max_ms))
         if recv_timeout is not None:
-            check_err(dh.set_ms(b"recv-timeout", recv_timeout))
+            check_err(dh.set_recv_timeout_ms(recv_timeout))
         if send_timeout is not None:
-            check_err(dh.set_ms(b"send-timeout", send_timeout))
+            check_err(dh.set_send_timeout_ms(send_timeout))
         cdef Dialer obj = Dialer.create(move(dh), self)
         self._dialers.append(obj)
         return obj
@@ -880,9 +876,9 @@ cdef class Socket:
         if tls is not None:
             check_err(lh.set_tls((<TlsConfig?>tls)._get_ptr()))
         if recv_timeout is not None:
-            check_err(lh.set_ms(b"recv-timeout", recv_timeout))
+            check_err(lh.set_recv_timeout_ms(recv_timeout))
         if send_timeout is not None:
-            check_err(lh.set_ms(b"send-timeout", send_timeout))
+            check_err(lh.set_send_timeout_ms(send_timeout))
         cdef Listener obj = Listener.create(move(lh), self)
         self._listeners.append(obj)
         return obj
@@ -1485,7 +1481,51 @@ cdef class PairSocket(Socket):
         self._handle = make_shared[SocketHandle](raw_sock)
         self._setup_pipe_tracking()
 
-# TODO: v1 has NNG_OPT_MAXTTL
+    @property
+    def recv_buf(self) -> int:
+        """Receive buffer depth (number of queued messages) before blocking.
+        
+        The Pair protocol blocks sending messages on the other side until
+        the message can be received successfully into the queue.
+
+        A value of 0 (the default) means no buffering, i.e. any unqueued send
+        on the other side is blocked until this side does a receive operation.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
+        return v
+
+    @recv_buf.setter
+    def recv_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_RECVBUF, n))
+
+    @property
+    def send_buf(self) -> int:
+        """Send buffer depth (number of queued messages) before blocking.
+        
+        When non zero, messages are queues to a send buffer until the
+        recepient side can receive them.  When the buffer is full, the sender blocks
+        until space is available. 0 means no buffering, i.e. the sender blocks until
+        the message can be received.
+
+        The default for Pair is 0.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check()
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_SENDBUF, &v))
+        return v
+
+    @send_buf.setter
+    def send_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
+
 
 cdef class PubSocket(Socket):
     """Publish socket — broadcasts every message to **all** connected subscribers.
@@ -1509,6 +1549,27 @@ cdef class PubSocket(Socket):
         check_err(nng_pub0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
         self._setup_pipe_tracking()
+
+    @property
+    def send_buf(self) -> int:
+        """Send buffer depth (number of queued messages) before dropping messages.
+        
+        The send queue enables to queue messages, enabling recipients time to
+        receive all of them. When the buffer is full, older messages are dropped and
+        cannot be received anymore by the subscribers.
+        The default is 16 for Pub.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check()
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_SENDBUF, &v))
+        return v
+
+    @send_buf.setter
+    def send_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
 
 
 cdef class SubSocket(Socket):
@@ -1545,6 +1606,46 @@ cdef class SubSocket(Socket):
         self._handle = make_shared[SocketHandle](raw_sock)
         self._setup_pipe_tracking()
 
+    @property
+    def recv_buf(self) -> int:
+        """Receive buffer depth (number of queued messages) before dropping messages.
+    
+        If the buffer is full, new messages are dropped according to
+        the skip_older_on_full_queue policy.
+
+        The default value is 128.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
+        return v
+
+    @recv_buf.setter
+    def recv_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_RECVBUF, n))
+
+    @property
+    def skip_older_on_full_queue(self) -> bool:
+        """Whether to drop older messages when the receive queue is full.
+
+        By default, when the receive queue is full, newer messages are kept and
+        older unread messages are dropped.  Setting this option to ``False``
+        reverses that behavior: older messages are kept and newer messages are
+        dropped instead.
+        """
+        self._check()
+        cdef cpp_bool v
+        check_err(nng_socket_get_bool(self._handle.get().raw(), NNG_OPT_SUB_PREFNEW, &v))
+        return bool(v)
+
+    @skip_older_on_full_queue.setter
+    def skip_older_on_full_queue(self, bint skip_older):
+        self._check()
+        check_err(nng_socket_set_bool(self._handle.get().raw(), NNG_OPT_SUB_PREFNEW, skip_older))
+
     def subscribe(self, prefix: bytes = b"") -> None:
         """Subscribe to messages whose body starts with *prefix*.
 
@@ -1561,25 +1662,6 @@ cdef class SubSocket(Socket):
         cdef const unsigned char[::1] mv = prefix
         check_err(nng_sub0_socket_unsubscribe(
             self._handle.get().raw(), &mv[0] if len(mv) else NULL, len(mv)))
-
-    @property
-    def skip_older_on_full_queue(self) -> bool:
-        """Whether to drop older messages when the receive queue is full.
-
-        By default, when the receive queue is full, newer messages are kept and
-        older unread messages are dropped.  Setting this option to ``False``
-        reverses that behavior: older messages are kept and newer messages are
-        dropped instead.
-        """
-        self._check()
-        cdef cpp_bool v
-        check_err(nng_socket_get_bool(self._handle.get().raw(), b"sub:prefnew", &v))
-        return bool(v)
-
-    @skip_older_on_full_queue.setter
-    def skip_older_on_full_queue(self, bint skip_older):
-        self._check()
-        check_err(nng_socket_set_bool(self._handle.get().raw(), b"sub:prefnew", skip_older))
 
     def open_context(self) -> SubContext:
         """Open an independent sub context on this socket."""
@@ -1635,20 +1717,22 @@ cdef class ReqSocket(Socket):
     
         ``-1`` (the default) disables automatic resending (exception on disconnect)
         Setting a positive value provides automatic fault-tolerance when working with
-        multiple REP peers, or possible packet loss.
+        multiple REP peers, or possible packet loss. However it has the drawback
+        of causing a pipe connection loss upon receiving a reply of the previous
+        request after the resend timer has fired.
 
         Setting a < 1000ms resend_time requires tuning :attr:`resend_tick` to
         have real effect.
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._handle.get().raw(), b"req:resend-time", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), NNG_OPT_REQ_RESENDTIME, &v))
         return v
 
     @resend_time.setter
     def resend_time(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._handle.get().raw(), b"req:resend-time", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_REQ_RESENDTIME, ms))
 
     @property
     def resend_tick(self) -> int:
@@ -1661,15 +1745,15 @@ cdef class ReqSocket(Socket):
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._handle.get().raw(), b"req:resend-tick", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), NNG_OPT_REQ_RESENDTICK, &v))
         return v
 
     @resend_tick.setter
     def resend_tick(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._handle.get().raw(), b"req:resend-tick", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_REQ_RESENDTICK, ms))
 
-    def open_context(self) -> Context:
+    def open_context(self) -> ReqContext:
         """Open an independent REQ context on this socket.
 
         Each context has its own send → receive → send state machine and can
@@ -1678,7 +1762,7 @@ cdef class ReqSocket(Socket):
         without opening multiple sockets.
         """
         self._check()
-        return Context.open(self)
+        return ReqContext.open(self)
 
 
 cdef class RepSocket(Socket):
@@ -1742,26 +1826,29 @@ cdef class PushSocket(Socket):
         self._setup_pipe_tracking()
 
     @property
-    def send_buffer_length(self) -> int:
-        """Maximum number of messages that can be buffered for sending to a peer.
+    def send_buf(self) -> int:
+        """Send buffer depth (number of queued messages) before blocking.
+        
+        When non zero, messages are queues to a send buffer until the
+        recepient side can receive them.  When the buffer is full, the sender blocks
+        until space is available.
 
         Default (0), means operations are unbuffers, and sending will block
         until a peer is available to receive the message.
 
-        Setting a positive value queues to an intermediate buffer of that many
-        messages.
+        The default for Push is 0.
 
-        The maximum value is 8192.
+        This value must be an integer between 0 and 8192, inclusive.
         """
         self._check()
         cdef int v
-        check_err(nng_socket_get_int(self._handle.get().raw(), b"send-buffer", &v))
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_SENDBUF, &v))
         return v
 
-    @send_buffer_length.setter
-    def send_buffer_length(self, int length):
+    @send_buf.setter
+    def send_buf(self, int n):
         self._check()
-        check_err(nng_socket_set_int(self._handle.get().raw(), b"send-buffer", length))
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
 
 cdef class PullSocket(Socket):
     """Pull socket — receives work items distributed by a :class:`PushSocket`.
@@ -1824,18 +1911,63 @@ cdef class SurveyorSocket(Socket):
         """
         self._check()
         cdef nng_duration v
-        check_err(nng_socket_get_ms(self._handle.get().raw(), b"surveyor:survey-time", &v))
+        check_err(nng_socket_get_ms(self._handle.get().raw(), NNG_OPT_SURVEYOR_SURVEYTIME, &v))
         return v
 
     @survey_time.setter
     def survey_time(self, int ms):
         self._check()
-        check_err(nng_socket_set_ms(self._handle.get().raw(), b"surveyor:survey-time", ms))
+        check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_SURVEYOR_SURVEYTIME, ms))
 
-    def open_context(self) -> Context:
+    @property
+    def recv_buf(self) -> int:
+        """Receive buffer depth (number of queued messages) before blocking/dropping.
+        
+        The blocking or dropping behavior depends on the protocol.
+
+        The default is 128 for Surveyor.
+        
+        A value of 0 means no buffering. The socket will block or drop (depending
+        on protocol) messages until the message can be received successfully
+        from at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
+        return v
+
+    @recv_buf.setter
+    def recv_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_RECVBUF, n))
+
+    @property
+    def send_buf(self) -> int:
+        """Send buffer depth (number of queued messages) before blocking.
+
+        The default is 8 for Surveyor.
+
+        A value of 0 means no buffering; the socket will block until the message
+        can be sent successfully to at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check()
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_SENDBUF, &v))
+        return v
+
+    @send_buf.setter
+    def send_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
+
+    def open_context(self) -> SurveyorContext:
         """Open an independent surveyor context on this socket."""
         self._check()
-        return Context.open(self)
+        return SurveyorContext.open(self)
 
 
 cdef class RespondentSocket(Socket):
@@ -1897,3 +2029,49 @@ cdef class BusSocket(Socket):
         check_err(nng_bus0_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
         self._setup_pipe_tracking()
+
+
+    @property
+    def recv_buf(self) -> int:
+        """Receive buffer depth (number of queued messages) before blocking/dropping.
+        
+        The blocking or dropping behavior depends on the protocol.
+
+        The default is 16 for Bus
+        
+        A value of 0 means no buffering. The socket will block or drop (depending
+        on protocol) messages until the message can be received successfully
+        from at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
+        return v
+
+    @recv_buf.setter
+    def recv_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_RECVBUF, n))
+
+    @property
+    def send_buf(self) -> int:
+        """Send buffer depth (number of queued messages) before blocking.
+
+        The default is 16 for Bus.
+
+        A value of 0 means no buffering; the socket will block until the message
+        can be sent successfully to at least one pipe.
+
+        This value must be an integer between 0 and 8192, inclusive.
+        """
+        self._check()
+        cdef int v
+        check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_SENDBUF, &v))
+        return v
+
+    @send_buf.setter
+    def send_buf(self, int n):
+        self._check()
+        check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
