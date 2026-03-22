@@ -144,6 +144,11 @@ public:
             auto pipe_h = find(nng_pipe_id(pipe));
             if (pipe_h) {
                 pipe_h->set_status(NNG_PIPE_EV_ADD_POST);
+            } else {
+                // This should never happen: we should have already added the pipe on ADD_PRE.
+                // But if it does, we can still recover by adding it now.
+                pipe_h = add(pipe);
+                pipe_h->set_status(NNG_PIPE_EV_ADD_POST);
             }
         }
         else if (ev == NNG_PIPE_EV_REM_POST) {

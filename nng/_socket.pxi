@@ -21,6 +21,7 @@ import enum as _enum
 
 from libcpp.memory cimport shared_ptr
 
+
 # ─ Socket address ─────────────────────────────────────────────
 cdef class SocketAddr:
     """Utility for converting nng_sockaddr to a URL string."""
@@ -216,40 +217,38 @@ cdef class Pipe:
         check_err(self._handle.get().self_addr(sa))
         return SocketAddr.create(sa)
 
-    cdef int handle_status_change(self):
-        """Check the current status of this pipe and fire the callback if it has changed."""
+    cdef object handle_status_change(self):
+        """Check the current status of this pipe and return the callback to call if any."""
         # Fail silently on invalid pipe
         if not self._handle:
-            return 0
+            return None
 
         # Fire the callback on change
-        self._handle_status_change_internal(self._handle.get().get_status())
-        return 0
+        return self._handle_status_change_internal(self._handle.get().get_status())
 
-    cdef int _handle_status_change_internal(self, uint32_t new_status):
-        """Set the new status, and if it has changed from the last known status 
-        and is not REMOVED, fire the callback.
+    cdef object _handle_status_change_internal(self, uint32_t new_status):
+        """Set the new status, and if it has changed return the callback to call if any.
+        
+        Note no new callback will be fired after REMOVED is reached. We
+        may set internally REMOVED before the pipe is reported removed
+        by NNG.
         """
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._status_mutex)
 
         # Fail silently on invalid pipe
         if not self._handle:
-            return 0
+            return None
 
-        # Fire the callback on change
+        # Request to fire the callback on change
         if new_status != self._last_known_status \
            and self._last_known_status != NNG_PIPE_EV_REM_POST:
             self._last_known_status = new_status
             cb = self.on_status_change
-            lock.unlock()
 
             if cb is not None:
-                try:
-                    cb()
-                except Exception:
-                    _print_exc()
-        return 0
+                return cb
+        return None
 
     def close(self) -> None:
         """Forcibly close this connection.
@@ -273,7 +272,9 @@ cdef class Pipe:
             check_err(err)
 
         # Handle status change immediately
-        self._handle_status_change_internal(NNG_PIPE_EV_REM_POST)
+        cb = self._handle_status_change_internal(NNG_PIPE_EV_REM_POST)
+        if cb is not None:
+            cb() # We can affort to raise on error in this function.
 
     def __repr__(self) -> str:
         if not self._handle:
@@ -439,53 +440,73 @@ cdef class Socket:
         if not self._handle:
             return 0
 
+        # Important: holding the lock before had_events. This
+        # is to ensure we return after any other update_pipes running
+        # in another thread. We want to return when the most up to
+        # date pipe status is reflected.
+        # This allows for instance dialer.start(block=True) to
+        # always have dialer.pipe not None when it returns (unless disconnect).
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+
         if not self._handle.get().pipe_collection().had_events():
             # Fast path: no events have been handled since the last update, so no changes to process.
             return 0
 
-        cdef unique_lock[DCGMutex] lock
-        lock_gil_friendly(lock, self._pipe_mutex)
-
+        # Retrieve all the current pipe handles
         cdef vector[shared_ptr[PipeHandle]] pipe_handles = self._handle.get().pipe_collection().get_pipes()
 
-        cdef list current_pipes = self._pipes
-        lock.unlock()
+        # Retrieve current Pipe instances
+        cdef list previous_pipes = self._pipes
 
+        # Retrieve the new pipes list mirroring pipe_handles
+        cdef list new_pipes = []
+        cdef list still_active_pipes = []
         cdef Pipe pipe
-        for pipe in current_pipes:
-            pipe.handle_status_change()
-
-        # Remove any pipes that are no longer in the collection
-        cdef list active_pipes = []
         cdef int i = 0
         cdef int j
 
         # Current_pipes and pipe_handles are in the same order
-        for pipe in current_pipes:
+        for pipe in previous_pipes:
             if i >= pipe_handles.size():
                 break
             if pipe._handle.get().get_id() == pipe_handles[i].get().get_id():
-                active_pipes.append(pipe)
+                still_active_pipes.append(pipe)
                 i += 1
 
         # Add novel pipes
-        new_pipes = []
         for j in range(i, pipe_handles.size()):
             new_pipes.append(self._create_pipe(pipe_handles[j]))
 
-        active_pipes.extend(new_pipes)
+        # Update the pipe list
+        self._pipes = still_active_pipes + new_pipes
 
-        # Update recording of pipes and retrieve pipe creation callback
-        lock_gil_friendly(lock, self._pipe_mutex)
-        self._pipes = active_pipes
-        cb = self._on_new_pipe_cb
+        # Retrieve the pipe creation callback
+        pipe_creation_cb = self._on_new_pipe_cb
+
+        # Update pipe status now, and call status callback later
+        cdef list pipe_update_cbs = []
+        for pipe in previous_pipes: # The other pipes are new and cannot have callbacks yet
+            cb = pipe.handle_status_change()
+            if cb is not None:
+                pipe_update_cbs.append(cb)
+
+        # Note: due to the remark at the start of update_pipes, we must do all
+        # the update processing in a single lock (no relock after this in this function)
         lock.unlock()
 
+        # Call the status change callbacks for existing pipes outside the lock
+        for cb in pipe_update_cbs:
+            try:
+                cb()
+            except Exception:
+                _print_exc()
+
         # Call the callbacks for new pipes outside the lock
-        if cb is not None:
+        if pipe_creation_cb is not None:
             for pipe in new_pipes:
                 try:
-                    cb(pipe)
+                    pipe_creation_cb(pipe)
                 except Exception:
                     _print_exc()
 
