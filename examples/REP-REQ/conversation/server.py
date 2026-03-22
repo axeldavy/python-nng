@@ -1,104 +1,62 @@
 """
-This module implements the server side of the secure REP/REQ pattern used in
-the secure subscriber example.
+This module implements the server side of the REP/REQ pattern where
+the server opens a conversation with each new client.
 
-The server is designed to handle multiple simultaneous clients, with each client
-associated with a unique nng Pipe, and which handshake and conversation occur
-in an exclusive asyncio task per client.
+Rather than having independent requests, this pattern is designed for long-lived
+conversations with each client, where messages may be follow-ups to previous messages
+and the server needs to maintain state per client.
 
-To use the server, subclass :class:`SecureRepServer` and implement the abstract
-:meth:`conversation` method to perform the application-specific conversation with
-the authenticated client.
-
-Use :class: `SecureReqClient` to connect to the server.
+This code is a simplified version of the secure REP server implementation
+proposed in the secure_subscriber example, without any of the security aspects.
+Use only in secure networks.
 """
 
 from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-import os
 import traceback
 from typing import TypeAlias
 
-import nacl.exceptions
-import nacl.public
-import nacl.signing
 
 import nng
 
-from .protocol_utils import (
-    CipherBox,
-    ErrorResponse,
-    HANDSHAKE_TIMEOUT_S
-)
-
-from .security_utils import (
-    b64dec,
-    generate_ephemeral_keypair,
-    HandshakeClientConfirm,
-    HandshakeClientHello,
-    make_server_auth,
-    make_session_box,
-    verify_client_confirm
-)
 
 
 _DispatchItem: TypeAlias = tuple[nng.Message, nng.Context, asyncio.Event]
 
 
-@dataclass(frozen=True, kw_only=True)
-class _ServerConfig:
-    """Immutable configuration snapshot passed to each per-client manager.
 
-    Attributes:
-        authorized_vks: Set of Ed25519 verify keys allowed to connect.
-        conversation_cb: Coroutine called with the conversation handle after the handshake.
-        server_signing_key: Server long-term Ed25519 signing key.
-        timeout: Per-client handshake timeout in seconds.
-    """
-
-    authorized_vks: frozenset[nacl.signing.VerifyKey]
-    conversation_cb: Callable[[_SecureRepConversation], Awaitable[None]]
-    server_signing_key: nacl.signing.SigningKey
-    timeout: float
-
-
-class _SecureRepConversationManager:
-    """Per-client nng transport manager for :class:`SecureRepServer`.
+class _RepConversationManager:
+    """Per-client nng transport manager for :class:`RepServer`.
 
     Owns the inbox queue, current-context tracking, and the per-client task.
-    Performs the three-message handshake then hands off to the application via
-    :attr:`_ServerConfig.conversation_cb`.
-
-    All crypto is owned by :class:`_SecureRepConversation`; this class is
-    entirely phase-agnostic.
 
     Not thread-safe.
     """
 
     __slots__ = {
-        "_config": "Immutable server configuration.",
-        "_current_ctx": "Context and reply event from the last _arecv_raw, cleared by _asend_raw.",
+        "_conversation_cb": "The conversation callback to invoke.",
+        "_current_ctx": "Context and reply event from the last arecv, cleared by asend.",
         "_inbox": "Single message queue for all phases (handshake and application).",
         "_pipe": "The nng Pipe identifying the remote client.",
         "_running": "Whether the manager task is still running (used to prevent dispatching after disconnect).",
     }
 
-    _config: _ServerConfig
+    _conversation_cb: Callable[["RepConversation"], Awaitable[None]]
     _current_ctx: tuple[nng.Context, asyncio.Event] | None
     _inbox: asyncio.Queue[_DispatchItem | None]
     _pipe: nng.Pipe
     _running: bool
 
-    def __init__(self, pipe: nng.Pipe, config: _ServerConfig) -> None:
+    def __init__(self, pipe: nng.Pipe, conversation_cb: Callable[["RepConversation"], Awaitable[None]]) -> None:
         """Initialise the manager for *pipe*.
 
         Args:
             pipe: The nng pipe identifying the remote client.
-            config: Immutable server configuration.
+            conversation_cb: The conversation callback to invoke.
+
         """
-        self._config = config
+        self._conversation_cb = conversation_cb
         self._current_ctx = None
         self._inbox = asyncio.Queue(maxsize=2) # one message + one None sentinel for disconnect
         self._pipe = pipe
@@ -112,69 +70,19 @@ class _SecureRepConversationManager:
     # ------------------------------------------------------------------
 
     async def _execute(self) -> None:
-        """Perform the handshake then invoke the conversation callback.
-
-        Uses :meth:`_arecv_raw` and :meth:`_asend_raw` throughout so that
-        ``_current_ctx`` management and reply-event release are centralised in
-        a single place.
+        """Invoke the conversation callback.
         """
-        # Start timed handshake.
-        config = self._config
+
+        # Run the conversation callback.
         try:
-            async with asyncio.timeout(config.timeout):
-                # Retrieve the initial client message
-                hello_msg = await self._arecv_raw()
+            conv = RepConversation(self)
+            await self._conversation_cb(conv)
 
-                # Parse ClientHello.
-                hello = HandshakeClientHello.from_json(hello_msg)
-                client_ephem_pub = nacl.public.PublicKey(b64dec(hello.client_ephem_pub_b64))
-                client_challenge = b64dec(hello.client_challenge_b64)
-
-                # Generate server ephemeral keys and derive the session box.
-                server_ephem_priv, server_ephem_pub = generate_ephemeral_keypair()
-                server_challenge = os.urandom(32)
-                box = make_session_box(server_ephem_priv, client_ephem_pub)
-
-                # Reply with ServerAuth — _asend_raw releases the hello dispatch slot.
-                await self._asend_raw(
-                    make_server_auth(
-                        client_ephem_pub, client_challenge,
-                        server_ephem_pub, server_challenge,
-                        config.server_signing_key,
-                    ).to_json()
-                )
-
-                # Wait for ClientConfirm — None means client disconnected.
-                raw = await self._arecv_raw()
-
-                # Decrypt and verify against all authorised verify keys.
-                raw_confirm = box.decrypt(raw)
-                confirm = HandshakeClientConfirm.from_json(raw_confirm)
-
-                # Check the signature against all authorized verify keys.
-                try:
-                    verify_client_confirm(
-                        confirm, config.authorized_vks, server_challenge, client_challenge,
-                        server_ephem_pub, client_ephem_pub,
-                    )
-                except nacl.exceptions.BadSignatureError:
-                    await self._asend_raw(ErrorResponse(reason="Unauthorized client").to_json())
-                    return
-
-
-                # Send handshake acknowledgement — releases the confirm dispatch slot.
-                await self._asend_raw(b"ok")
-
-            # Run the conversation callback.
-            conv = _SecureRepConversation(self, box)
-            try:
-                await config.conversation_cb(conv)
-            except ConnectionResetError:
-                pass
-
+        # Do not report normal disconnects as errors.
         except ConnectionResetError:
-            pass  # Client disconnected during handshake — normal for rejected clients.
+            pass
 
+        # Clean up on exit or error
         finally:
             # Stop accepting messages
             self._running = False
@@ -198,7 +106,7 @@ class _SecureRepConversationManager:
             self._inbox.shutdown()
 
     # ------------------------------------------------------------------
-    # Dispatch interface (called by SecureRepServer._recv_dispatch)
+    # Dispatch interface (called by RepServer._recv_dispatch)
     # ------------------------------------------------------------------
 
     def _dispatch(
@@ -207,7 +115,7 @@ class _SecureRepConversationManager:
         ctx: nng.Context,
         reply_event: asyncio.Event,
     ) -> None:
-        """Enqueue an inbound message for :meth:`_execute` to consume via :meth:`_arecv_raw`.
+        """Enqueue an inbound message for :meth:`_execute` to consume via :meth:`arecv`.
 
         Called outside _execute to pass ownership of the message and the
         dispatch slot to the manager. The manager is responsible for
@@ -252,7 +160,7 @@ class _SecureRepConversationManager:
     def _disconnect(self) -> None:
         """Place a ``None`` sentinel into the inbox to signal disconnection.
 
-        The next :meth:`_arecv_raw` call will raise :exc:`ConnectionResetError`,
+        The next :meth:`arecv` call will raise :exc:`ConnectionResetError`,
         unblocking whichever await is currently waiting.
         """
         self._running = False
@@ -265,11 +173,11 @@ class _SecureRepConversationManager:
     # Raw transport (shared by handshake and application layer)
     # ------------------------------------------------------------------
 
-    async def _arecv_raw(self) -> bytes:
-        """Pop the next message from the inbox, record its context, and return raw bytes.
+    async def arecv(self) -> nng.Message:
+        """Pop the next message from the inbox, record its context, and return the message.
 
         Returns:
-            Raw (unencrypted) message bytes.
+            The received nng message.
 
         Raises:
             ConnectionResetError: If a ``None`` sentinel is dequeued (client disconnected).
@@ -279,23 +187,23 @@ class _SecureRepConversationManager:
         if item is None:
             raise ConnectionResetError("Client disconnected")
 
-        # Record context so _asend_raw can reply on the correct context.
+        # Record context so asend can reply on the correct context.
         msg, ctx, reply_event = item
         self._current_ctx = (ctx, reply_event)
-        return msg.to_bytes()
+        return msg
 
-    async def _asend_raw(self, data: bytes) -> None:
-        """Send raw bytes on the current context and release the dispatch slot.
+    async def asend(self, data: bytes | nng.Message) -> None:
+        """Send message on the current context and release the dispatch slot.
 
         Args:
-            data: Raw bytes to send (caller is responsible for encryption if needed).
+            data: Raw bytes or nng.Message to send (caller is responsible for encryption if needed).
 
         Raises:
-            RuntimeError: If called without a preceding :meth:`_arecv_raw` or
+            RuntimeError: If called without a preceding :meth:`arecv` or
                 :meth:`_run` prime (no current context).
         """
         if self._current_ctx is None:
-            raise RuntimeError("_asend_raw() called without a current context")
+            raise RuntimeError("asend() called without a current context")
 
         # Capture and clear before the await so re-entrancy is safe.
         ctx, reply_event = self._current_ctx
@@ -314,43 +222,37 @@ class _SecureRepConversationManager:
             reply_event.set()
 
 
-class _SecureRepConversation:
-    """Per-client conversation handle exposing encrypted send/recv.
+class RepConversation:
+    """Per-client conversation handle exposing asend/arecv.
 
-    Created by :class:`_SecureRepConversationManager` once the handshake
-    completes and passed as the sole argument to
-    :meth:`SecureRepServer.conversation`.
+    Created by :class:`_RepConversationManager`
+    and passed as the sole argument to
+    :meth:`RepServer.conversation`.
 
-    All nng transport is delegated to the manager; this class owns only the
-    crypto layer (session box + encrypt/decrypt).
+    All nng transport is delegated to the manager.
 
     Raises :exc:`ConnectionResetError` when the peer disconnects (propagated
-    from :meth:`_SecureRepConversationManager._arecv_raw`).
+    from :meth:`_RepConversationManager.arecv`).
 
     Not thread-safe.
     """
 
     __slots__ = {
-        "_box": "Session authenticated-encryption box.",
         "_manager": "Transport manager handling the nng context and inbox queue.",
     }
 
-    _box: CipherBox
-    _manager: _SecureRepConversationManager
+    _manager: _RepConversationManager
 
     def __init__(
         self,
-        manager: _SecureRepConversationManager,
-        box: CipherBox,
+        manager: _RepConversationManager
     ) -> None:
-        """Initialise with the transport manager and session box.
+        """Initialise with the transport manager.
 
         Args:
             manager: The per-client transport manager.
-            box: The session encryption box derived during the handshake.
         """
         self._manager = manager
-        self._box = box
 
     # ------------------------------------------------------------------
     # Public property
@@ -365,103 +267,68 @@ class _SecureRepConversation:
     # Async send / recv
     # ------------------------------------------------------------------
 
-    async def arecv(self) -> bytes:
-        """Receive and decrypt the next message from this client (async).
+    async def arecv(self) -> nng.Message:
+        """Receive the next message from this client (async).
 
         Returns:
-            Decrypted payload bytes.
+            The next nng.Message from the client.
 
         Raises:
             ConnectionResetError: If the client disconnected.
-            nacl.exceptions.CryptoError: If decryption or authentication fails.
         """
-        raw = await self._manager._arecv_raw()  # type: ignore[reportPrivateUsage]
-        return self._box.decrypt(raw)
+        return await self._manager.arecv()
 
-    async def asend(self, data: bytes) -> None:
-        """Encrypt *data* and send it as the reply to the current request (async).
+    async def asend(self, data: bytes | nng.Message) -> None:
+        """Send data it as the reply to the current request (async).
 
         Args:
-            data: Plaintext bytes to encrypt and send.
+            data: bytes or nng.Message to send.
 
         Raises:
             RuntimeError: If called before a matching :meth:`arecv`.
             ConnectionResetError: If the client disconnected before or during the send.
-            nacl.exceptions.CryptoError: If encryption fails.
         """
-        await self._manager._asend_raw(self._box.encrypt(data))  # type: ignore[reportPrivateUsage]
+        await self._manager.asend(data)
 
 
-class SecureRepServer(ABC):
-    """Abstract multi-client REP server with per-pipe authenticated encryption.
-
-    Each connecting client must complete the three-message client-first handshake
-    (``ClientHello`` → ``ServerAuth`` → ``ClientConfirm``).  After the handshake
-    succeeds the abstract :meth:`conversation` method is called in the same task
-    that performed the handshake, with a :class:`_SecureRepConversation` handle
-    that provides encrypted :meth:`~_SecureRepConversation.arecv` /
-    :meth:`~_SecureRepConversation.asend` for that specific client.
+class RepServer(ABC):
+    """Abstract multi-client REP server with per-pipe conversation handles.
 
     Usage::
 
-        class EchoServer(SecureRepServer):
-            async def conversation(self, conv: _SecureRepConversation) -> None:
+        class EchoServer(RepServer):
+            async def conversation(self, conv: RepConversation) -> None:
                 while True:
                     data = await conv.arecv()
                     await conv.asend(data)
 
         async def main() -> None:
             async with asyncio.TaskGroup() as tg:
-                server = EchoServer(server_signing_key, authorized_vks)
+                server = EchoServer()
                 server.serve(tg, "tcp://127.0.0.1:5000")
 
     Not thread-safe.
     """
 
     __slots__ = {
-        "_authorized_vks": "Frozen set of authorized client Ed25519 verify keys.",
         "_clients": "Dict mapping active pipes to their per-client managers.",
-        "_config": "Server configuration built in serve(); None before serve() is called.",
         "_loop": "Event loop captured at serve() for threadsafe nng callbacks.",
-        "_server_signing_key": "Server long-term Ed25519 signing key.",
         "_socket": "The nng RepSocket.",
-        "_timeout": "Per-client handshake timeout in seconds.",
         "_tg": "TaskGroup passed to serve(); used to spawn per-client tasks.",
     }
 
-    _authorized_vks: frozenset[nacl.signing.VerifyKey]
-    _clients: dict[nng.Pipe, _SecureRepConversationManager]
-    _config: _ServerConfig | None
+    _clients: dict[nng.Pipe, _RepConversationManager]
     _loop: asyncio.AbstractEventLoop | None
-    _server_signing_key: nacl.signing.SigningKey
     _socket: nng.RepSocket
-    _timeout: float
     _tg: asyncio.TaskGroup | None
 
-    def __init__(
-        self,
-        server_signing_key: nacl.signing.SigningKey,
-        authorized_vks: frozenset[nacl.signing.VerifyKey],
-        *,
-        timeout: float = HANDSHAKE_TIMEOUT_S,
-    ) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         """Initialise the server but do not bind yet.
 
-        Call :meth:`serve` once inside an ``asyncio.TaskGroup`` to start
-        accepting connections.
-
-        Args:
-            server_signing_key: The server's long-term Ed25519 signing key.
-            authorized_vks: Frozen set of client Ed25519 verify keys that are
-                allowed to connect.
-            timeout: Per-client handshake timeout in seconds.
+        Arguments are passed through the contained RepSocket.
         """
-        self._server_signing_key = server_signing_key
-        self._authorized_vks = authorized_vks
-        self._timeout = timeout
-        self._socket = nng.RepSocket()
+        self._socket = nng.RepSocket(*args, **kwargs)
         self._clients = {}
-        self._config = None
         self._loop = None
         self._tg = None
 
@@ -470,14 +337,14 @@ class SecureRepServer(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def conversation(self, conv: _SecureRepConversation) -> None:
-        """Handle one authenticated client session.
+    async def conversation(self, conv: RepConversation) -> None:
+        """Handle one client session.
 
         This method should be implemented in a subclass to implement
         the application specific conversation logic. The conv object
-        provides an already authenticated client with encrypted `asend`/`arecv`.
+        provides an already client with `asend`/`arecv`.
 
-        Each authenticated client runs `conversation` inside a separate
+        Each client runs `conversation` inside a separate
         task, and all `asend` and `arecv` receive and send messages
         only to that client.
 
@@ -488,7 +355,7 @@ class SecureRepServer(ABC):
         client session and close the connection.
 
         Args:
-            conv: Conversation handle providing encrypted `asend`/`arecv` for this
+            conv: Conversation handle providing `asend`/`arecv` for this
                 specific client.
         """
 
@@ -516,14 +383,6 @@ class SecureRepServer(ABC):
 
         # Store task group reference so we can spawn per-client tasks
         self._tg = tg
-
-        # Build the immutable config snapshot to pass to managers
-        self._config = _ServerConfig(
-            authorized_vks=self._authorized_vks,
-            conversation_cb=self.conversation,
-            server_signing_key=self._server_signing_key,
-            timeout=self._timeout,
-        )
 
         # Start listening and register the new-pipe callback to track clients.
         self._socket.on_new_pipe(self._on_new_pipe)
@@ -582,7 +441,7 @@ class SecureRepServer(ABC):
         Reuses the same context for every receive/reply cycle.  After routing
         an inbound message to the appropriate manager, the task suspends on an
         :class:`asyncio.Event` set by
-        :meth:`_SecureRepConversationManager._asend_raw` once the reply has
+        :meth:`_RepConversationManager.asend` once the reply has
         been sent — ensuring *ctx* is free for the next
         :meth:`~nng.Context.arecv`.
 
@@ -599,7 +458,6 @@ class SecureRepServer(ABC):
             ctx: The nng context to reuse for all receive/reply cycles.
         """
         assert self._tg is not None
-        assert self._config is not None
         try:
             while True:
                 try:
@@ -614,14 +472,14 @@ class SecureRepServer(ABC):
 
                 # No pipe — reply with an error to advance the REP state machine.
                 if pipe is None:
-                    await ctx.asend(ErrorResponse(reason="No pipe").to_json())
+                    await ctx.asend(b"No pipe")
                     continue
 
                 # Create a handshape + conversation if the client doesn't exist yet
                 client = self._clients.get(pipe, None)
                 if client is None:
                     # Initialize conversation and spawn a dedicated client task
-                    client = _SecureRepConversationManager(pipe, self._config)
+                    client = _RepConversationManager(pipe, self.conversation)
                     new_task = self._tg.create_task(client._execute())  # type: ignore[reportPrivateUsage]
 
                     # Add to known clients
@@ -649,3 +507,190 @@ class SecureRepServer(ABC):
         except nng.NngClosed:
             # Socket was closed — exit gracefully.
             return
+
+
+# ---------------------------------------------------------------------------
+# Start of the Demo (the code above can be reused/adapted for your application)
+# ---------------------------------------------------------------------------
+
+"""
+Demo: stateful per-client calculator server.
+
+Each client gets its own accumulator.  Supported commands (sent as UTF-8):
+
+    add <n>   – add n to the accumulator
+    sub <n>   – subtract n
+    mul <n>   – multiply by n
+    div <n>   – divide by n  (replies with "Error: …" on division by zero)
+    reset     – reset accumulator to 0
+    result    – query the current accumulator without changing it
+    quit      – end the session cleanly
+
+Replies are also plain UTF-8: the numeric result, or an error string.
+"""
+
+import argparse
+import logging
+
+DEFAULT_URL: str = "tcp://127.0.0.1:5555"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+_LOG = logging.getLogger("calc-server")
+
+
+class CalculatorServer(RepServer):
+    """Stateful per-client calculator over the conversation pattern.
+
+    Each connected client gets its own floating-point accumulator.
+    The accumulator persists for the entire lifetime of the connection.
+    """
+
+    async def conversation(self, conv: RepConversation) -> None:
+        """Handle one client session until it sends 'quit' or disconnects.
+
+        Args:
+            conv: Conversation handle providing ``asend``/``arecv`` for this
+                specific client.
+        """
+        accumulator: float = 0.0
+        peer_addr = conv.pipe.get_peer_addr()
+        _LOG.info(f"Client {peer_addr} connected")
+
+        # Minimal handshake to let clients know a new conversation
+        # started in case of disconnection
+        first_msg = await conv.arecv()
+        if first_msg.to_bytes() != b"start conversation":
+            await conv.asend(b"Expected 'start conversation' as the first message")
+            return
+        await conv.asend(b"ok")
+
+        try:
+            while True:
+                msg = await conv.arecv()
+                command = bytes(msg).decode("utf-8").strip()
+                _LOG.debug("Client %s → %r", peer_addr, command)
+    
+                # Simulate a long-running command to demonstrate interleaving with other clients.
+                # and the impact of the number of contexts
+                await asyncio.sleep(1)
+
+                # Parse and execute the command.
+                reply = _handle_command(command, accumulator)
+                if reply is None:
+                    # 'quit' — acknowledge and end the conversation.
+                    await conv.asend(b"bye")
+                    break
+
+                new_value, response = reply
+                accumulator = new_value
+                await conv.asend(response.encode("utf-8"))
+
+        except ConnectionResetError:
+            _LOG.info("Client %s disconnected", peer_addr)
+        finally:
+            _LOG.info("Client %s session ended  (accumulator=%.4g)", peer_addr, accumulator)
+
+
+def _handle_command(
+    command: str, accumulator: float
+) -> tuple[float, str] | None:
+    """Execute *command* against *accumulator*.
+
+    Args:
+        command: Raw command string from the client.
+        accumulator: Current accumulator value.
+
+    Returns:
+        ``(new_accumulator, reply_string)`` on success, or ``None`` for 'quit'.
+    """
+    parts = command.split(maxsplit=1)
+    op = parts[0].lower() if parts else ""
+
+    # Quit sentinel.
+    if op == "quit":
+        return None
+
+    # Query without mutation.
+    if op == "result":
+        return accumulator, f"{accumulator:.6g}"
+
+    # Reset.
+    if op == "reset":
+        return 0.0, "0"
+
+    # Arithmetic — all require a numeric argument.
+    if op not in ("add", "sub", "mul", "div"):
+        return accumulator, f"Error: unknown command {op!r}"
+
+    if len(parts) < 2:
+        return accumulator, f"Error: {op} requires a numeric argument"
+
+    try:
+        operand = float(parts[1])
+    except ValueError:
+        return accumulator, f"Error: {parts[1]!r} is not a number"
+
+    if op == "add":
+        new = accumulator + operand
+    elif op == "sub":
+        new = accumulator - operand
+    elif op == "mul":
+        new = accumulator * operand
+    else:  # div
+        if operand == 0:
+            return accumulator, "Error: division by zero"
+        new = accumulator / operand
+
+    return new, f"{new:.6g}"
+
+
+async def main(url: str, n_contexts: int) -> None:
+    """Run the calculator server until interrupted.
+
+    Args:
+        url: NNG transport URL to listen on.
+        n_contexts: Number of concurrent receive contexts.
+    """
+    _LOG.info("Calculator server listening on %s", url)
+    server = CalculatorServer()
+    try:
+        async with asyncio.TaskGroup() as tg:
+            server.serve(tg, url, n_contexts=n_contexts)
+    except* (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        server.close()
+        _LOG.info("Server shut down")
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Stateful per-client calculator server (conversation pattern demo)."
+    )
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_URL,
+        help=f"NNG listen URL (default: {DEFAULT_URL})",
+    )
+    parser.add_argument(
+        "--contexts",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Concurrent receive contexts (default: 4)",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    _args = _parse_args()
+    try:
+        asyncio.run(main(_args.url, _args.contexts))
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+
