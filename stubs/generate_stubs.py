@@ -163,6 +163,9 @@ RETURN_TYPES: dict[tuple[str | None, str], str] = {
     # Socket factory methods
     ("Socket", "add_dialer"):   "Dialer",
     ("Socket", "add_listener"): "Listener",
+    ("SubSocket",      "open_context"): "SubContext",
+    ("ReqSocket",      "open_context"): "ReqContext",
+    ("SurveyorSocket", "open_context"): "SurveyorContext",
 }
 
 # Property type overrides: (class_name_or_None, prop_name) → type string.
@@ -206,6 +209,10 @@ WRITABLE_PROPS: set[tuple[str, str]] = {
     ("Context",      "recv_buf"),
     ("Context",      "skip_older_on_full_queue"),
     ("Context",      "survey_time"),
+    ("ReqContext",   "resend_time"),
+    ("SubContext",   "recv_buf"),
+    ("SubContext",   "skip_older_on_full_queue"),
+    ("SurveyorContext", "survey_time"),
     ("Pipe",         "on_status_change"),
     ("PairSocket",   "polyamorous"),
     ("PairSocket",   "recv_buf"),
@@ -687,6 +694,9 @@ _CLASS_ORDER = [
     "Dialer",
     "Listener",
     "Context",
+    "ReqContext",
+    "SubContext",
+    "SurveyorContext",
     "Socket",
     "PairSocket",
     "PubSocket",

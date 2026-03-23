@@ -38,7 +38,15 @@ public:
         return *this;
     }
 
-    ~ListenerHandle() { close_if_open(); }
+    ~ListenerHandle() = default;
+    // NOT { close_if_open(); }
+    // The reason is that ListenerHandle destruction in our codebase
+    // can only occur if the Listener is released. And as Listener
+    // is referenced by the socket, it can only happen if Socket is released.
+    // Since we want to allow releasing Socket while having contexts alive,
+    // we must delay the actual listener close until the shared_ptr<SocketHandle>
+    // refcount drops to zero. The SocketHandle destructor will call close() on
+    // the socket which closes all its listeners, including this one.
 
     // ── Ownership ─────────────────────────────────────────────────────────
 

@@ -1053,7 +1053,13 @@ class Context:
 
     @property
     def socket(self) -> Socket | None:
-        """The parent Socket for this context."""
+        """
+        The parent Socket for this context.
+
+        Note: the context only holds a weak reference to the parent
+        socket to avoid reference cycles, so this property may raise
+        :exc:`RuntimeError` if no other references to the parent socket exist.
+        """
         ...
 
     async def arecv(self) -> Message:
@@ -1102,6 +1108,126 @@ class Context:
     def __repr__(self) -> str:
         """Return repr(self)."""
         ...
+
+
+class ReqContext(Context):
+    """
+    Independent REQ context on a :class:`ReqSocket`.
+
+    REQ contexts have an independent send-receive state machine from their
+    parent socket, allowing multiple concurrent requests.
+    """
+    @property
+    def resend_time(self) -> int:
+        """
+        How long (ms) to wait for a reply before resending the request.
+
+        Requests are automatically resent if the peer disconnects.
+
+        resend_time adds a timer at which requests will be resent (even if no
+        disconnection has been detected) to the peer until a reply is received.
+
+        ``-1`` (the default) disables automatic resending (exception on disconnect)
+        Setting a positive value provides automatic fault-tolerance when working with
+        multiple REP peers, or possible packet loss. However it has the drawback
+        of causing a pipe connection loss upon receiving a reply of the previous
+        request after the resend timer has fired.
+
+        Setting a < 1000ms resend_time requires tuning the socket `resend_tick`
+        attribute to have real effect.
+
+        Contexts inherit from the socket parameter at creation.
+        """
+        ...
+    @resend_time.setter
+    def resend_time(self, value: int) -> None: ...
+
+
+class SubContext(Context):
+    """
+    Independent sub context on a :class:`SubSocket`.
+
+    Sub contexts have an independant subscription state as their
+    parent socket. They thus can be used to implement multiple logical
+    subscribers sharing the same underlying socket.
+    """
+    @property
+    def recv_buf(self) -> int:
+        """
+        Receive buffer depth (number of queued messages).
+
+        Unlike other protocols, the SUB protocol enables a per context
+        receive buffer depth, which limits the number of messages that can be
+        queued for the subscriptions associated with this context.
+
+        If the buffer is full, new messages are dropped according to
+        the skip_older_on_full_queue policy.
+
+        The default value is the one configured on the parent socket at the
+        time of the socket creation (which is 128 by default).
+        """
+        ...
+    @recv_buf.setter
+    def recv_buf(self, value: int) -> None: ...
+
+    @property
+    def skip_older_on_full_queue(self) -> bool:
+        """
+        Whether to drop older messages when the receive queue is full.
+
+        If True, when the receive queue is full, newer messages are kept and
+        older unread messages are dropped.  Setting this option to ``False``
+        reverses that behavior: older messages are kept and newer messages are
+        dropped instead.
+
+        The default value is the one configured on the parent socket at the
+        time of the socket creation (which is True by default).
+        """
+        ...
+    @skip_older_on_full_queue.setter
+    def skip_older_on_full_queue(self, value: bool) -> None: ...
+
+    def subscribe(self, prefix: bytes = b'') -> None:
+        """
+        Subscribe to messages whose body starts with *prefix*.
+
+        An empty prefix subscribes to all messages.
+
+        Contexts do not inherit from the socket parameter at creation,
+        and start with an empty subscription set (no messages).
+        """
+        ...
+
+    def unsubscribe(self, prefix: bytes = b'') -> None:
+        """
+        Unsubscribe from messages whose body starts with *prefix*.
+
+        An empty prefix unsubscribes from all messages.
+        """
+        ...
+
+
+class SurveyorContext(Context):
+    """
+    Independent surveyor context on a :class:`SurveyorSocket`.
+
+    Surveyor contexts have an independant survey_time parameter as their
+    parent socket.
+    """
+    @property
+    def survey_time(self) -> int:
+        """
+        Survey deadline in milliseconds.
+
+        After sending a survey, the socket accepts responses for this long.
+        Once the deadline expires, :meth:`recv` raises :exc:`NngError` with
+        ``NngTimeout``.  The next :meth:`send` starts a fresh survey.
+
+        Contexts inherit from the socket parameter at creation.
+        """
+        ...
+    @survey_time.setter
+    def survey_time(self, value: int) -> None: ...
 
 
 class Socket:
@@ -1697,7 +1823,7 @@ class SubSocket(Socket):
     @skip_older_on_full_queue.setter
     def skip_older_on_full_queue(self, value: bool) -> None: ...
 
-    def open_context(self) -> Context:
+    def open_context(self) -> SubContext:
         """Open an independent sub context on this socket."""
         ...
 
@@ -1782,7 +1908,7 @@ class ReqSocket(Socket):
     @resend_time.setter
     def resend_time(self, value: int) -> None: ...
 
-    def open_context(self) -> Context:
+    def open_context(self) -> ReqContext:
         """
         Open an independent REQ context on this socket.
 
@@ -1951,7 +2077,7 @@ class SurveyorSocket(Socket):
     @survey_time.setter
     def survey_time(self, value: int) -> None: ...
 
-    def open_context(self) -> Context:
+    def open_context(self) -> SurveyorContext:
         """Open an independent surveyor context on this socket."""
         ...
 
