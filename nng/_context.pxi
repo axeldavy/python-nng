@@ -31,19 +31,13 @@ cdef class Context:
         raise RuntimeError("Context cannot be instantiated directly. Use Socket.open_context() instead.")
 
     @staticmethod
-    cdef Context create(shared_ptr[ContextHandle] ch):
-        """Take ownership of an already-created ContextHandle."""
-        cdef Context context = Context.__new__(Context)
-        context._handle = ch
-        return context
-
-    @staticmethod
     cdef Context open(Socket socket):
         """Open a new context on *socket* and return a Context wrapping it."""
         cdef int err = 0
         cdef shared_ptr[ContextHandle] ch = make_context(socket._handle, err)
         check_err(err)
-        cdef Context ctx = Context.create(ch)
+        cdef Context ctx = Context.__new__(Context)
+        ctx._handle = ch
         ctx._weak_socket_ref = _weakref(socket)
         return ctx
 
@@ -435,6 +429,7 @@ cdef class ReqContext(Context):
         check_err(err)
         cdef ReqContext ctx = ReqContext.__new__(ReqContext)
         ctx._handle = ch
+        ctx._weak_socket_ref = _weakref(socket)
         return ctx
 
     @property
@@ -484,6 +479,7 @@ cdef class SubContext(Context):
         check_err(err)
         cdef SubContext ctx = SubContext.__new__(SubContext)
         ctx._handle = ch
+        ctx._weak_socket_ref = _weakref(socket)
         return ctx
 
     @property
@@ -576,6 +572,7 @@ cdef class SurveyorContext(Context):
         check_err(err)
         cdef SurveyorContext ctx = SurveyorContext.__new__(SurveyorContext)
         ctx._handle = ch
+        ctx._weak_socket_ref = _weakref(socket)
         return ctx
 
 
