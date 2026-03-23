@@ -58,11 +58,17 @@ cdef class Context:
 
     @property
     def socket(self) -> Socket:
-        """The parent Socket for this context."""
+        """The parent Socket for this context.
+        
+        Note: the context only holds a weak reference to the parent
+        socket to avoid reference cycles, so this property may raise
+        :exc:`RuntimeError` if no other references to the parent socket exist.
+        """
         self._check()
         sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
+        # Note: _check should fail is the socket is closed.
         if sock is None:
-            raise NngClosed(NNG_ECLOSED, "Parent socket has been closed")
+            raise RuntimeError("Couldn't retrieve parent Socket for Context; it may have been garbage collected.")
         return sock
 
     # ── Synchronous send / recv ────────────────────────────────────────────
@@ -231,13 +237,17 @@ cdef class Context:
 
         sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
 
-        if sock is None:
-            raise RuntimeError("Invalid Socket")
+        # Obtain the per-loop AIO manager from the socket
+        cdef _AioAsyncManager mgr
+        cdef _AioSockASync op
+        if sock is not None:
+            mgr = (<Socket>sock).get_aio_manager()
+            op = mgr.create_aio_for_context(self._handle)
+            del sock
 
-        # Obtain the per-loop AIO manager (created lazily on first call).
-        cdef _AioAsyncManager mgr = (<Socket>sock).get_aio_manager()
-        cdef _AioSockASync op = mgr.create_aio_for_context(self._handle)
-        del sock
+        # Fallback in case the user kept not reference to the socket
+        else:
+            op = _AioCbASync.create_for_context_cb(self._handle)
 
         # Build the nng message
         cdef nng_msg *ptr = NULL
@@ -277,13 +287,17 @@ cdef class Context:
 
         sock = self._weak_socket_ref() if self._weak_socket_ref is not None else None
 
-        if sock is None:
-            raise RuntimeError("Invalid Socket")
+        # Obtain the per-loop AIO manager from the socket
+        cdef _AioAsyncManager mgr
+        cdef _AioSockASync op
+        if sock is not None:
+            mgr = (<Socket>sock).get_aio_manager()
+            op = mgr.create_aio_for_context(self._handle)
+            del sock
 
-        # Obtain the per-loop AIO manager (created lazily on first call).
-        cdef _AioAsyncManager mgr = (<Socket>sock).get_aio_manager()
-        cdef _AioSockASync op = mgr.create_aio_for_context(self._handle)
-        del sock
+        # Fallback in case the user kept not reference to the socket
+        else:
+            op = _AioCbASync.create_for_context_cb(self._handle)
 
         # Fetch the future now as get_future is invalid after submission
         future = op.get_future()
