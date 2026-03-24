@@ -183,6 +183,50 @@ cdef class Dialer:
         check_err(rv)
         return v
 
+    @property
+    def tcp_nodelay(self) -> bool:
+        """``True`` when TCP_NODELAY (Nagle disabled) is active on this dialer (Default).
+
+        This corresponds to the ``NNG_OPT_TCP_NODELAY`` option.  Configured
+        at construction time via :meth:`Socket.add_dialer`.
+
+        Raises
+        ------
+        NngClosed
+            If the dialer has been closed.
+        NngNotSupported
+            If this dialer does not use the TCP transport.
+        """
+        self._check()
+        cdef cpp_bool v = False
+        cdef int rv = self._handle.get_nodelay(&v)
+        if rv == NNG_ENOENT:
+            rv = NNG_ECLOSED
+        check_err(rv)
+        return bool(v)
+
+    @property
+    def tcp_keepalive(self) -> bool:
+        """``True`` when TCP keep-alive probes are enabled on this dialer.
+
+        This corresponds to the ``NNG_OPT_TCP_KEEPALIVE`` option.  Configured
+        at construction time via :meth:`Socket.add_dialer`.
+
+        Raises
+        ------
+        NngClosed
+            If the dialer has been closed.
+        NngNotSupported
+            If this dialer does not use the TCP transport.
+        """
+        self._check()
+        cdef cpp_bool v = False
+        cdef int rv = self._handle.get_keepalive(&v)
+        if rv == NNG_ENOENT:
+            rv = NNG_ECLOSED
+        check_err(rv)
+        return bool(v)
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def start(self, *, bint block=True) -> None:

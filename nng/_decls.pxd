@@ -223,6 +223,8 @@ cdef extern from "nng/nng.h":
     int nng_dialer_get_ms    (nng_dialer, const char *, nng_duration *) nogil
     int nng_dialer_get_tls   (nng_dialer, nng_tls_config **)        nogil
     int nng_dialer_get_url   (nng_dialer, const nng_url **)         nogil
+    int nng_dialer_get_addr  (nng_dialer, const char *, nng_sockaddr *) nogil
+    int nng_dialer_set_addr  (nng_dialer, const char *, const nng_sockaddr *) nogil
 
     # ── Listener options ──────────────────────────────────────────────────────
     int nng_listener_set_bool  (nng_listener, const char *, bint)     nogil

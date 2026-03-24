@@ -86,6 +86,24 @@ public:
     }
     int start() noexcept { return nng_listener_start(_l, 0); }
 
+    // ── TCP options ───────────────────────────────────────────────────────
+
+    // TCP_NODELAY: disable Nagle's algorithm when true (default true).
+    int get_nodelay(bool* v) const noexcept {
+        return nng_listener_get_bool(_l, NNG_OPT_TCP_NODELAY, v);
+    }
+    int set_nodelay(bool v) noexcept {
+        return nng_listener_set_bool(_l, NNG_OPT_TCP_NODELAY, v);
+    }
+
+    // TCP_KEEPALIVE: enable TCP keep-alive probes when true (default false).
+    int get_keepalive(bool* v) const noexcept {
+        return nng_listener_get_bool(_l, NNG_OPT_TCP_KEEPALIVE, v);
+    }
+    int set_keepalive(bool v) noexcept {
+        return nng_listener_set_bool(_l, NNG_OPT_TCP_KEEPALIVE, v);
+    }
+
     // Raw accessor kept for interop with nng APIs not yet wrapped.
     nng_listener raw() const noexcept { return _l; }
 

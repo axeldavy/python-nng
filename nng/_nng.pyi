@@ -623,6 +623,24 @@ class Pipe:
         """Current :class:`PipeStatus` of this pipe."""
         ...
 
+    @property
+    def tcp_keepalive(self) -> bool:
+        """
+        ``True`` when TCP keep-alive probes were enabled at connection time.
+
+        Captured once at pipe creation.  Always ``False`` for non-TCP pipes.
+        """
+        ...
+
+    @property
+    def tcp_nodelay(self) -> bool:
+        """
+        ``True`` when TCP_NODELAY (Nagle disabled) was active at connection time.
+
+        Captured once at pipe creation.  Always ``False`` for non-TCP pipes.
+        """
+        ...
+
     def close(self) -> None:
         """
         Forcibly close this connection.
@@ -794,6 +812,40 @@ class Dialer:
         """The parent :class:`Socket` for this dialer."""
         ...
 
+    @property
+    def tcp_keepalive(self) -> bool:
+        """
+        ``True`` when TCP keep-alive probes are enabled on this dialer.
+
+        This corresponds to the ``NNG_OPT_TCP_KEEPALIVE`` option.  Configured
+        at construction time via :meth:`Socket.add_dialer`.
+
+        Raises
+        ------
+        NngClosed
+            If the dialer has been closed.
+        NngNotSupported
+            If this dialer does not use the TCP transport.
+        """
+        ...
+
+    @property
+    def tcp_nodelay(self) -> bool:
+        """
+        ``True`` when TCP_NODELAY (Nagle disabled) is active on this dialer (Default).
+
+        This corresponds to the ``NNG_OPT_TCP_NODELAY`` option.  Configured
+        at construction time via :meth:`Socket.add_dialer`.
+
+        Raises
+        ------
+        NngClosed
+            If the dialer has been closed.
+        NngNotSupported
+            If this dialer does not use the TCP transport.
+        """
+        ...
+
     def close(self) -> None:
         """
         Close the dialer and tear down its active connection, if any.
@@ -951,6 +1003,40 @@ class Listener:
     @property
     def socket(self) -> Socket | None:
         """The parent :class:`Socket` for this listener."""
+        ...
+
+    @property
+    def tcp_keepalive(self) -> bool:
+        """
+        ``True`` when TCP keep-alive probes are enabled on this listener.
+
+        This corresponds to the ``NNG_OPT_TCP_KEEPALIVE`` option.  Configured
+        at construction time via :meth:`Socket.add_listener`.
+
+        Raises
+        ------
+        NngClosed
+            If the listener has been closed.
+        NngNotSupported
+            If this listener does not use the TCP transport.
+        """
+        ...
+
+    @property
+    def tcp_nodelay(self) -> bool:
+        """
+        ``True`` when TCP_NODELAY (Nagle disabled) is active on this listener.
+
+        This corresponds to the ``NNG_OPT_TCP_NODELAY`` option.  Configured
+        at construction time via :meth:`Socket.add_listener`.
+
+        Raises
+        ------
+        NngClosed
+            If the listener has been closed.
+        NngNotSupported
+            If this listener does not use the TCP transport.
+        """
         ...
 
     def close(self) -> None:
@@ -1410,7 +1496,7 @@ class Socket:
     @send_timeout.setter
     def send_timeout(self, value: int) -> None: ...
 
-    def add_dialer(self, url: str | bytes, *, tls: TlsConfig | None = None, reconnect_min_ms: int | None = None, reconnect_max_ms: int | None = None, recv_timeout: int | None = None, send_timeout: int | None = None) -> Dialer:
+    def add_dialer(self, url: str | bytes, *, tls: TlsConfig | None = None, reconnect_min_ms: int | None = None, reconnect_max_ms: int | None = None, recv_timeout: int | None = None, send_timeout: int | None = None, tcp_nodelay: bool | None = None, tcp_keepalive: bool | None = None, tcp_local_addr: str | None = None) -> Dialer:
         """
         Create, configure, and register an outbound :class:`Dialer` for *url*.
 
@@ -1433,10 +1519,25 @@ class Socket:
         protocol layer pools all resulting pipes and distributes messages
         across them.
 
+        Note the self address of a dialer after it has connected to a peer
+        can be retrieved from the dialer's active pipe (``dialer.pipe.get_self_addr()``),
+        and may change at every reconnection (in particular the port).
+
         Parameters
         ----------
         url:
-            Connection URL, e.g. ``"tcp://127.0.0.1:5555"``.
+            Connection URL.  Supported schemes:
+
+            * ``tcp://host:port`` — TCP/IP.  *host* is a DNS name or an
+              IPv4/IPv6 address literal.  IPv6 addresses must be bracketed:
+              ``tcp://[::1]:5555``.  Use ``tcp4://`` or ``tcp6://`` to force
+              IPv4-only or IPv6-only DNS resolution respectively.  The port
+              is required and must be non-zero (you are connecting *to* a
+              port, not binding one).
+            * ``ipc:///path/to/socket`` — Unix-domain socket (POSIX only).
+            * ``inproc://name`` — in-process transport (same process only).
+            * ``ws://host:port/path`` — WebSocket.
+            * ``wss://host:port/path`` — WebSocket over TLS.
         tls:
             A :class:`TlsConfig` for TLS connections.  The object must remain
             alive for the lifetime of the dialer.
@@ -1454,6 +1555,24 @@ class Socket:
         send_timeout:
             Send timeout in ms for the pipe created by this dialer
             (overrides the socket-level value).
+        tcp_nodelay:
+            Set ``NNG_OPT_TCP_NODELAY`` on the TCP connection.  ``True``
+            disables Nagle's algorithm (lower latency, potentially more
+            packets).  ``False`` enables it (fewer, larger packets).
+            ``None`` (default) leaves the OS/nng default in place (True).
+            Has no effect for non-TCP transports.
+        tcp_keepalive:
+            Set ``NNG_OPT_TCP_KEEPALIVE`` on the TCP connection.  ``True``
+            enables TCP keep-alive probes, which detect dead connections even
+            when no application data is flowing.  ``None`` (default) leaves
+            the OS/nng default in place (False).  Has no effect for non-TCP transports.
+        tcp_local_addr:
+            Source IP address string (e.g. ``"192.168.1.5"`` or ``"::1"``)
+            to bind the outgoing connection to. Only useful on multi-homed hosts
+            to select a specific network interface.  The port is ignored —
+            the OS assigns an ephemeral source port automatically.  ``None``
+            (default) lets the OS choose the source address.  Only supported
+            for TCP (``tcp://`` scheme).
 
         Raises
         ------
@@ -1465,10 +1584,12 @@ class Socket:
             rather than NngInvalidArgument for unrecognized transport names.
         NngInvalidArgument
             If *url* is otherwise syntactically invalid for a known transport.
+        ValueError
+            If *tcp_local_addr* is not a valid IPv4 or IPv6 address string.
         """
         ...
 
-    def add_listener(self, url: str | bytes, *, tls: TlsConfig | None = None, recv_timeout: int | None = None, send_timeout: int | None = None) -> Listener:
+    def add_listener(self, url: str | bytes, *, tls: TlsConfig | None = None, recv_timeout: int | None = None, send_timeout: int | None = None, tcp_nodelay: bool | None = None, tcp_keepalive: bool | None = None) -> Listener:
         """
         Create, configure, and register an inbound :class:`Listener` for *url*.
 
@@ -1493,7 +1614,19 @@ class Socket:
         Parameters
         ----------
         url:
-            Address to bind to, e.g. ``"tcp://0.0.0.0:5555"``.
+            Address to bind to.  Supported schemes:
+
+            * ``tcp://host:port`` — TCP/IP.  Use ``0.0.0.0`` (or simply ``:``)
+              to accept on all local IPv4 interfaces, ``[::]`` for all local
+              IPv6 interfaces, or an explicit IP to restrict to a single interface
+              (e.g. ``tcp://127.0.0.1:5555`` for loopback-only).  Use ``tcp4://``
+              or ``tcp6://`` to force a specific IP version.  Port ``0`` lets
+              the OS assign an ephemeral port; retrieve the actual port from
+              :attr:`Listener.port` after :meth:`Listener.start` returns.
+            * ``ipc:///path/to/socket`` — Unix-domain socket or Windows named pipe.
+            * ``inproc://name`` — in-process transport (same process only).
+            * ``ws://addr:port/path`` — WebSocket.
+            * ``wss://addr:port/path`` — WebSocket over TLS.
         tls:
             A :class:`TlsConfig` for TLS connections.  The object must remain
             alive for the lifetime of the listener.
@@ -1504,6 +1637,15 @@ class Socket:
         send_timeout:
             Send timeout in ms for pipes accepted by this listener
             (overrides the socket-level value).
+        tcp_nodelay:
+            Set ``NNG_OPT_TCP_NODELAY`` on accepted TCP connections.  ``True``
+            disables Nagle's algorithm (lower latency, potentially more
+            packets).  ``None`` (default) leaves the OS/nng default in place (True).
+            Has no effect for non-TCP transports.
+        tcp_keepalive:
+            Set ``NNG_OPT_TCP_KEEPALIVE`` on accepted TCP connections.  ``True``
+            enables TCP keep-alive probes.  ``None`` (default) leaves the
+            OS/nng default in place (False).  Has no effect for non-TCP transports.
 
         Raises
         ------

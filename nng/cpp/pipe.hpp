@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -26,6 +27,7 @@ public:
           _dialer{0}, _listener{0}, _socket{0},
           _peer_addr{}, _peer_addr_err(0),
           _self_addr{}, _self_addr_err(0),
+          _nodelay(true), _keepalive(false),
           _status(0) {}
 
     // Capture all metadata while the nng_pipe handle is still valid.
@@ -39,7 +41,13 @@ public:
           _peer_addr_err(nng_pipe_peer_addr(p, &_peer_addr)),
           _self_addr{},
           _self_addr_err(nng_pipe_self_addr(p, &_self_addr)),
-          _status(0) {}
+          _nodelay(true), _keepalive(false),
+          _status(0) {
+        // Cache TCP boolean options; ignore errors (non-TCP transports return
+        // NNG_ENOTSUP and the defaults of true/false are correct in that case).
+        nng_pipe_get_bool(p, NNG_OPT_TCP_NODELAY,   &_nodelay);
+        nng_pipe_get_bool(p, NNG_OPT_TCP_KEEPALIVE, &_keepalive);
+    }
 
     // Non-copyable: each PipeHandle instance corresponds to exactly one pipe.
     PipeHandle(const PipeHandle&)            = delete;
@@ -86,6 +94,14 @@ public:
         return _self_addr_err;
     }
 
+    // ── TCP options (cached, no nng calls) ────────────────────────────────
+
+    // Whether TCP_NODELAY (Nagle disabled) was active at connection time.
+    bool get_nodelay() const noexcept { return _nodelay; }
+
+    // Whether TCP_KEEPALIVE was active at connection time.
+    bool get_keepalive() const noexcept { return _keepalive; }
+
     // ── Status (managed by PipeCollection) ──────────────────────────────
 
     int  get_status() const noexcept { return _status; }
@@ -106,6 +122,8 @@ private:
     int          _peer_addr_err;
     nng_sockaddr _self_addr;
     int          _self_addr_err;
+    bool         _nodelay;                 // TCP_NODELAY at connection time
+    bool         _keepalive;              // TCP_KEEPALIVE at connection time
     int          _status;
 };
 

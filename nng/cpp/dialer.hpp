@@ -95,6 +95,37 @@ public:
     }
     int start(int flags) noexcept { return nng_dialer_start(_d, flags); }
 
+    // ── TCP options ───────────────────────────────────────────────────────
+
+    // TCP_NODELAY: disable Nagle's algorithm when true (default true).
+    int get_nodelay(bool* v) const noexcept {
+        return nng_dialer_get_bool(_d, NNG_OPT_TCP_NODELAY, v);
+    }
+    int set_nodelay(bool v) noexcept {
+        return nng_dialer_set_bool(_d, NNG_OPT_TCP_NODELAY, v);
+    }
+
+    // TCP_KEEPALIVE: enable TCP keep-alive probes when true (default false).
+    int get_keepalive(bool* v) const noexcept {
+        return nng_dialer_get_bool(_d, NNG_OPT_TCP_KEEPALIVE, v);
+    }
+    int set_keepalive(bool v) noexcept {
+        return nng_dialer_set_bool(_d, NNG_OPT_TCP_KEEPALIVE, v);
+    }
+
+    // LOCADDR: source address for outgoing connections.
+    // get_local_addr is only meaningful after the connection has been
+    // established; returns the actual bound local address.
+    // set_local_addr must be called before start() to bind to a specific
+    // local IP (useful on multi-homed hosts). The port in *sa is ignored
+    // by nng; the OS assigns an ephemeral port.
+    int get_local_addr(nng_sockaddr* sa) const noexcept {
+        return nng_dialer_get_addr(_d, NNG_OPT_LOCADDR, sa);
+    }
+    int set_local_addr(const nng_sockaddr* sa) noexcept {
+        return nng_dialer_set_addr(_d, NNG_OPT_LOCADDR, sa);
+    }
+
     // Raw accessor kept for interop with nng APIs not yet wrapped.
     nng_dialer raw() const noexcept { return _d; }
 

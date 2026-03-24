@@ -18,16 +18,45 @@ from asyncio import get_running_loop as _get_running_loop
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from selectors import DefaultSelector as _DefaultSelector, EVENT_READ as _EVENT_READ
 import enum as _enum
+import socket as _pysocket
 
 from libcpp.memory cimport shared_ptr
 
-"""
-TODO options:
-NNG_OPT_URL (dialer/listener/pipe): canonified transport url
+cdef nng_sockaddr _ip_str_to_sockaddr(str ip_str):
+    """Convert a dotted-decimal or colon-hex IP address string to nng_sockaddr.
 
-NNG_OPT_LOCADDR (listener/dialer)
-NNG_OPT_TCP_NODELAY and NNG_OPT_TCP_KEEPALIVE (dialer/listener)
-"""
+    The port in the returned struct is always zero — nng ignores the port when
+    binding a source address for an outgoing TCP connection.
+
+    Raises
+    ------
+    ValueError
+        If *ip_str* is not a valid IPv4 or IPv6 address.
+    """
+    cdef nng_sockaddr sa
+    memset(&sa, 0, sizeof(sa))
+
+    # Try IPv4 first, then IPv6.
+    try:
+        packed = _pysocket.inet_pton(_pysocket.AF_INET, ip_str)
+        sa.s_in.sa_family = NNG_AF_INET
+        sa.s_in.sa_port   = 0
+        memcpy(&sa.s_in.sa_addr, <const char*>packed, 4)
+        return sa
+    except OSError:
+        pass
+
+    try:
+        packed = _pysocket.inet_pton(_pysocket.AF_INET6, ip_str)
+        sa.s_in6.sa_family = NNG_AF_INET6
+        sa.s_in6.sa_port   = 0
+        sa.s_in6.sa_scope  = 0
+        memcpy(sa.s_in6.sa_addr, <const char*>packed, 16)
+        return sa
+    except OSError:
+        pass
+
+    raise ValueError(f"Invalid IP address: {ip_str!r}")
 
 # ─ Socket address ─────────────────────────────────────────────
 cdef class SocketAddr:
@@ -223,6 +252,27 @@ cdef class Pipe:
         cdef nng_sockaddr sa
         check_err(self._handle.get().self_addr(sa))
         return SocketAddr.create(sa)
+
+
+    @property
+    def tcp_nodelay(self) -> bool:
+        """``True`` when TCP_NODELAY (Nagle disabled) was active at connection time.
+
+        Captured once at pipe creation.  Always ``False`` for non-TCP pipes.
+        """
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+        return bool(self._handle.get().get_nodelay())
+
+    @property
+    def tcp_keepalive(self) -> bool:
+        """``True`` when TCP keep-alive probes were enabled at connection time.
+
+        Captured once at pipe creation.  Always ``False`` for non-TCP pipes.
+        """
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+        return bool(self._handle.get().get_keepalive())
 
     cdef object handle_status_change(self):
         """Check the current status of this pipe and return the callback to call if any."""
@@ -740,7 +790,10 @@ cdef class Socket:
                    reconnect_min_ms=None,
                    reconnect_max_ms=None,
                    recv_timeout=None,
-                   send_timeout=None) -> Dialer:
+                   send_timeout=None,
+                   tcp_nodelay=None,
+                   tcp_keepalive=None,
+                   tcp_local_addr=None) -> Dialer:
         """Create, configure, and register an outbound :class:`Dialer` for *url*.
 
         The dialer is created and all options applied, but the connection is
@@ -762,10 +815,25 @@ cdef class Socket:
         protocol layer pools all resulting pipes and distributes messages
         across them.
 
+        Note the self address of a dialer after it has connected to a peer
+        can be retrieved from the dialer's active pipe (``dialer.pipe.get_self_addr()``),
+        and may change at every reconnection (in particular the port).
+
         Parameters
         ----------
         url:
-            Connection URL, e.g. ``"tcp://127.0.0.1:5555"``.
+            Connection URL.  Supported schemes:
+
+            * ``tcp://host:port`` — TCP/IP.  *host* is a DNS name or an
+              IPv4/IPv6 address literal.  IPv6 addresses must be bracketed:
+              ``tcp://[::1]:5555``.  Use ``tcp4://`` or ``tcp6://`` to force
+              IPv4-only or IPv6-only DNS resolution respectively.  The port
+              is required and must be non-zero (you are connecting *to* a
+              port, not binding one).
+            * ``ipc:///path/to/socket`` — Unix-domain socket (POSIX only).
+            * ``inproc://name`` — in-process transport (same process only).
+            * ``ws://host:port/path`` — WebSocket.
+            * ``wss://host:port/path`` — WebSocket over TLS.
         tls:
             A :class:`TlsConfig` for TLS connections.  The object must remain
             alive for the lifetime of the dialer.
@@ -783,6 +851,24 @@ cdef class Socket:
         send_timeout:
             Send timeout in ms for the pipe created by this dialer
             (overrides the socket-level value).
+        tcp_nodelay:
+            Set ``NNG_OPT_TCP_NODELAY`` on the TCP connection.  ``True``
+            disables Nagle's algorithm (lower latency, potentially more
+            packets).  ``False`` enables it (fewer, larger packets).
+            ``None`` (default) leaves the OS/nng default in place (True).
+            Has no effect for non-TCP transports.
+        tcp_keepalive:
+            Set ``NNG_OPT_TCP_KEEPALIVE`` on the TCP connection.  ``True``
+            enables TCP keep-alive probes, which detect dead connections even
+            when no application data is flowing.  ``None`` (default) leaves
+            the OS/nng default in place (False).  Has no effect for non-TCP transports.
+        tcp_local_addr:
+            Source IP address string (e.g. ``"192.168.1.5"`` or ``"::1"``)
+            to bind the outgoing connection to. Only useful on multi-homed hosts
+            to select a specific network interface.  The port is ignored —
+            the OS assigns an ephemeral source port automatically.  ``None``
+            (default) lets the OS choose the source address.  Only supported
+            for TCP (``tcp://`` scheme).
 
         Raises
         ------
@@ -794,10 +880,13 @@ cdef class Socket:
             rather than NngInvalidArgument for unrecognized transport names.
         NngInvalidArgument
             If *url* is otherwise syntactically invalid for a known transport.
+        ValueError
+            If *tcp_local_addr* is not a valid IPv4 or IPv6 address string.
         """
         self._check()
         cdef bytes b = _encode_url(url)
         cdef int err = 0
+        cdef nng_sockaddr sa
         cdef DialerHandle dh = make_dialer(self._handle, b, err)
         check_err(err)
         # Options: if any check_err raises, dh's destructor auto-calls nng_dialer_close.
@@ -811,6 +900,13 @@ cdef class Socket:
             check_err(dh.set_recv_timeout_ms(recv_timeout))
         if send_timeout is not None:
             check_err(dh.set_send_timeout_ms(send_timeout))
+        if tcp_nodelay is not None:
+            check_err(dh.set_nodelay(<cpp_bool>tcp_nodelay))
+        if tcp_keepalive is not None:
+            check_err(dh.set_keepalive(<cpp_bool>tcp_keepalive))
+        if tcp_local_addr is not None:
+            sa = _ip_str_to_sockaddr(str(tcp_local_addr))
+            check_err(dh.set_local_addr(&sa))
         cdef Dialer obj = Dialer.create(move(dh), self)
         self._dialers.append(obj)
         return obj
@@ -818,7 +914,9 @@ cdef class Socket:
     def add_listener(self, url, *,
                      tls=None,
                      recv_timeout=None,
-                     send_timeout=None) -> Listener:
+                     send_timeout=None,
+                     tcp_nodelay=None,
+                     tcp_keepalive=None) -> Listener:
         """Create, configure, and register an inbound :class:`Listener` for *url*.
 
         The listener is created and all options applied, but it does **not**
@@ -842,7 +940,19 @@ cdef class Socket:
         Parameters
         ----------
         url:
-            Address to bind to, e.g. ``"tcp://0.0.0.0:5555"``.
+            Address to bind to.  Supported schemes:
+
+            * ``tcp://host:port`` — TCP/IP.  Use ``0.0.0.0`` (or simply ``:``)
+              to accept on all local IPv4 interfaces, ``[::]`` for all local
+              IPv6 interfaces, or an explicit IP to restrict to a single interface
+              (e.g. ``tcp://127.0.0.1:5555`` for loopback-only).  Use ``tcp4://``
+              or ``tcp6://`` to force a specific IP version.  Port ``0`` lets
+              the OS assign an ephemeral port; retrieve the actual port from
+              :attr:`Listener.port` after :meth:`Listener.start` returns.
+            * ``ipc:///path/to/socket`` — Unix-domain socket or Windows named pipe.
+            * ``inproc://name`` — in-process transport (same process only).
+            * ``ws://addr:port/path`` — WebSocket.
+            * ``wss://addr:port/path`` — WebSocket over TLS.
         tls:
             A :class:`TlsConfig` for TLS connections.  The object must remain
             alive for the lifetime of the listener.
@@ -853,6 +963,15 @@ cdef class Socket:
         send_timeout:
             Send timeout in ms for pipes accepted by this listener
             (overrides the socket-level value).
+        tcp_nodelay:
+            Set ``NNG_OPT_TCP_NODELAY`` on accepted TCP connections.  ``True``
+            disables Nagle's algorithm (lower latency, potentially more
+            packets).  ``None`` (default) leaves the OS/nng default in place (True).
+            Has no effect for non-TCP transports.
+        tcp_keepalive:
+            Set ``NNG_OPT_TCP_KEEPALIVE`` on accepted TCP connections.  ``True``
+            enables TCP keep-alive probes.  ``None`` (default) leaves the
+            OS/nng default in place (False).  Has no effect for non-TCP transports.
 
         Raises
         ------
@@ -879,6 +998,10 @@ cdef class Socket:
             check_err(lh.set_recv_timeout_ms(recv_timeout))
         if send_timeout is not None:
             check_err(lh.set_send_timeout_ms(send_timeout))
+        if tcp_nodelay is not None:
+            check_err(lh.set_nodelay(<cpp_bool>tcp_nodelay))
+        if tcp_keepalive is not None:
+            check_err(lh.set_keepalive(<cpp_bool>tcp_keepalive))
         cdef Listener obj = Listener.create(move(lh), self)
         self._listeners.append(obj)
         return obj

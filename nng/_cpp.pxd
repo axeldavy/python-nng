@@ -79,6 +79,8 @@ cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
         nng_socket   get_socket()
         int          peer_addr(nng_sockaddr& sa)
         int          self_addr(nng_sockaddr& sa)
+        cpp_bool     get_nodelay()
+        cpp_bool     get_keepalive()
         int          get_status()
         void         set_status(int s)
         bint operator==(const PipeHandle& o)
@@ -144,6 +146,12 @@ cdef extern from "nng/cpp/dialer.hpp" namespace "nng_cpp" nogil:
         int set_reconnect_time_max_ms(nng_duration v)
         int set_tls(nng_tls_config* cfg)
         int start(int flags)
+        int get_nodelay(cpp_bool* v)
+        int set_nodelay(cpp_bool v)
+        int get_keepalive(cpp_bool* v)
+        int set_keepalive(cpp_bool v)
+        int get_local_addr(nng_sockaddr* sa)
+        int set_local_addr(const nng_sockaddr* sa)
         nng_dialer raw()
 
 # ── ListenerHandle ────────────────────────────────────────────────────────────
@@ -163,6 +171,10 @@ cdef extern from "nng/cpp/listener.hpp" namespace "nng_cpp" nogil:
         int set_send_timeout_ms(nng_duration v)
         int set_tls(nng_tls_config* cfg)
         int start()
+        int get_nodelay(cpp_bool* v)
+        int set_nodelay(cpp_bool v)
+        int get_keepalive(cpp_bool* v)
+        int set_keepalive(cpp_bool v)
         nng_listener raw()
 
 # ── ContextHandle ─────────────────────────────────────────────────────────────

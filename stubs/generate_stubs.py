@@ -73,6 +73,9 @@ PARAM_TYPES: dict[str, str] = {
     "reconnect_max_ms":   "int | None",
     "recv_timeout":       "int | None",
     "send_timeout":       "int | None",
+    "tcp_keepalive":    "bool | None",
+    "tcp_nodelay":      "bool | None",
+    "tcp_local_addr":   "str | None",
     # initialize() params
     "num_task_threads":   "int",
     "max_task_threads":   "int",
@@ -196,6 +199,8 @@ PROP_TYPES: dict[tuple[str | None, str], str] = {
     (None, "skip_older_on_full_queue"): "bool",
     (None, "survey_time"):    "int",
     (None, "port"):           "int",
+    (None, "tcp_keepalive"): "bool",
+    (None, "tcp_nodelay"): "bool",
 }
 
 # Read-write properties: (class_name, prop_name).  All others are read-only.
