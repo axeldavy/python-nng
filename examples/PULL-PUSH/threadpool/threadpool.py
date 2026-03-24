@@ -33,10 +33,11 @@ Work items are stored in a shared dict keyed by an auto-incrementing
 call-id. Only that 8-byte integer is sent over the wire on this demo.
 
 Graceful shutdown is achieved by closing the push socket. We catch connection
-loss and close the workers context, which causes ``submit_recv()`` future
+loss and close the workers context, which causes ``recv()``
 to raise an exception, which the worker catches and uses as its exit signal.
 """
 
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future
 import math
@@ -87,15 +88,19 @@ class NngThreadPool:
 
         # Thread-safe bookkeeping: maps call_id → (future, fn, args, kwargs).
         # The worker pops its entry, so no separate futures dict is needed.
-        self._lock = threading.Lock()
+        self._next_id_lock = threading.Lock()
         self._next_id: int = 0
         self._pending: dict[int, tuple[Future[Any], Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = {}
 
         # The push socket is shared across the main thread only.
         # A separate lock guards it so submit() is thread-safe.
-        self._push_lock = threading.Lock()
         self._push = nng.PushSocket()
         self._push.add_listener(url).start()
+
+        # Allow pending command buffering (up to 8192 commands)
+        # The default (0) means that send is blocking until at least
+        # a worker does a recv (unbuffered).
+        self._push.send_buf = 8192
 
         # Spawn worker threads.
         self._workers: list[threading.Thread] = []
@@ -113,17 +118,16 @@ class NngThreadPool:
     def _worker_loop(self) -> None:
         """Each worker owns one PullSocket and blocks waiting for messages."""
         with nng.PullSocket() as pull:
-            pull.add_dialer(self._url).start(block=True)
+            dialer = pull.add_dialer(self._url)
+            dialer.start(block=True)
 
             # After a successful blocking start the pipe is live.
             # Register a status-change callback: when the push side closes
             # the pipe transitions to REMOVED, at which point we close the
-            # pull socket so that the pending submit_recv() raises NngClosed.
+            # pull socket so that the pending recv() raises NngClosed.
 
-            # Wait the pipe callback to fill in the pull.pipes list, then grab the pipe object.
-            while not pull.pipes:
-                time.sleep(0.01)
-            pipe = pull.pipes[0]
+            pipe = dialer.pipe
+            assert pipe is not None  # blocking start
 
             def _on_pipe_status_change() -> None:
                 if pipe.status == nng.PipeStatus.REMOVED:
@@ -131,22 +135,23 @@ class NngThreadPool:
 
             pipe.on_status_change = _on_pipe_status_change
 
+            # Fetch then run work items until the pipe is closed
             while True:
                 try:
-                    raw = pull.submit_recv().result()  # nng.Message
+                    msg = pull.recv()  # nng.Message
                 except Exception:
                     # Pull socket was closed by the pipe callback → exit.
-                    print(f"{threading.current_thread().name} exiting")
                     return
 
-                (call_id,) = _ID_PACK.unpack(bytes(raw))
+                (call_id,) = _ID_PACK.unpack(msg)
 
-                with self._lock:
-                    entry = self._pending.pop(call_id, None)
+                # Note: dict is threadsafe for pop on nogil.
+                entry = self._pending.pop(call_id, None)
 
                 if entry is None:
-                    continue  # already cancelled or double-delivered
+                    continue  # cancel_futures=True may have removed this item already
 
+                # Run the work item and set the future's result or exception.
                 future, fn, args, kwargs = entry
                 if future.cancelled():
                     continue
@@ -172,13 +177,17 @@ class NngThreadPool:
             raise RuntimeError("Cannot submit work after shutdown() has been called")
 
         future: Future[Any] = Future()
-        with self._lock:
+        with self._next_id_lock:
             call_id = self._next_id
             self._next_id += 1
-            self._pending[call_id] = (future, fn, args, kwargs)
 
-        with self._push_lock:
-            self._push.submit_send(_ID_PACK.pack(call_id)).result()
+        self._pending[call_id] = (future, fn, args, kwargs)
+
+        # Pack message
+        msg = _ID_PACK.pack(call_id)
+
+        # Append the call_id to the push queue.
+        self._push.send(msg)
 
         return future  # type: ignore[return-value]
 
@@ -187,6 +196,7 @@ class NngThreadPool:
         fn: Callable[..., T],
         *iterables: Iterable[Any],
         timeout: float | None = None,
+        buffersize = None
     ) -> Iterator[T]:
         """Map *fn* over *iterables* and yield results **in submission order**.
 
@@ -196,14 +206,28 @@ class NngThreadPool:
         * Results are yielded as each future completes **in order**, so a slow
           early item will delay later ones even if they finished first.
         """
-        futures = [self.submit(fn, *args) for args in zip(*iterables)]
+        # buffersize limits the number of in-flight tasks (i.e. queued + running)
+        if buffersize is not None:
+            self._push.send_buf = max(0, buffersize - self._num_workers)
+        else:
+            buffersize = 8192 # PushSocket has a maximum send buffer of 8192
+
+        futures = deque()
+        for args in zip(*iterables):
+            futures.append(self.submit(fn, *args))
+            if len(futures) >= buffersize:
+                yield futures.popleft().result(timeout=timeout)
+
         for f in futures:
             yield f.result(timeout=timeout)
+    
+        # Restore default
+        self._push.send_buf = 8192
 
-    def shutdown(self, wait: bool = True) -> None:
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
         """Signal all workers to stop and (optionally) wait for them.
 
-        Closing the push socket causes every worker's pending ``submit_recv()``
+        Closing the push socket causes every worker's pending ``recv()``
         to raise an exception, which each worker interprets as its exit signal.
 
         After ``shutdown()`` returns, the pool is no longer usable.
@@ -212,10 +236,21 @@ class NngThreadPool:
             return
         self._shutdown = True
 
+        # Remove pending work items and cancel their futures.
+        if cancel_futures:
+            while True:
+                # Remove item from last inserted to first.
+                # Note: popitem is threadsafe for nogil.
+                try:
+                    _, (future, _, _, _) = self._pending.popitem()
+                    future.cancel()
+                except KeyError:
+                    break # self._pending is now empty
+
         # Closing the push socket unblocks all workers at once.
         self._push.close()
-        print("... shutdown signal sent, waiting for workers to exit ...")
 
+        # Wait threads join
         if wait:
             for t in self._workers:
                 t.join()

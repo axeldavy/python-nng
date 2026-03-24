@@ -11,6 +11,14 @@ followed by one send before the next recv is allowed.  Contexts lift that
 restriction, letting each task block independently in arecv() while the
 others are processing or awaiting their own replies.
 
+IMPORTANT PERFORMANCE NOTES:
+NNG's implementation of contexts are designed to be efficient. Having
+thousands of contexts enables to potentially have up to thousands of concurrent
+requests in-flight, without adding overhead. Thus you can spawn many
+more contexts than needed without performance penalty. However to avoid
+any penalty you must avoid having a receive timeout, in which case
+the arecv will periodically check for cancellation, which adds overhead.
+
     python server.py
 """
 
