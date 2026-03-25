@@ -108,39 +108,6 @@ cdef class Dialer:
     # ── Options (read-only; set via Socket.add_dialer) ────────────────────
 
     @property
-    def recv_timeout(self) -> int:
-        """Per-dialer receive timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-        Raises
-        ------
-        NngClosed
-            If the dialer has been closed.
-        """
-        self._check()
-        cdef nng_duration v
-        cdef int rv = self._handle.get_recv_timeout_ms(&v)
-        if rv == NNG_ENOENT: # see start()
-            rv = NNG_ECLOSED
-        check_err(rv)
-        return v
-
-    @property
-    def send_timeout(self) -> int:
-        """Per-dialer send timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-
-        Raises
-        ------
-        NngClosed
-            If the dialer has been closed.
-        """
-        self._check()
-        cdef nng_duration v
-        cdef int rv = self._handle.get_send_timeout_ms(&v)
-        if rv == NNG_ENOENT: # see start()
-            rv = NNG_ECLOSED
-        check_err(rv)
-        return v
-
-    @property
     def reconnect_min_ms(self) -> int:
         """Minimum reconnect interval in milliseconds.
 

@@ -789,8 +789,6 @@ cdef class Socket:
                    tls=None,
                    reconnect_min_ms=None,
                    reconnect_max_ms=None,
-                   recv_timeout=None,
-                   send_timeout=None,
                    tcp_nodelay=None,
                    tcp_keepalive=None,
                    tcp_local_addr=None) -> Dialer:
@@ -844,13 +842,6 @@ cdef class Socket:
             Maximum reconnect interval in ms.  Retries use exponential
             back-off capped at this value.  ``0`` (default) means use
             *reconnect_min_ms* as a fixed interval.
-        recv_timeout:
-            Receive timeout in ms for the pipe created by this dialer
-            (overrides the socket-level value).  ``-1`` = infinite,
-            ``0`` = non-blocking.
-        send_timeout:
-            Send timeout in ms for the pipe created by this dialer
-            (overrides the socket-level value).
         tcp_nodelay:
             Set ``NNG_OPT_TCP_NODELAY`` on the TCP connection.  ``True``
             disables Nagle's algorithm (lower latency, potentially more
@@ -896,10 +887,6 @@ cdef class Socket:
             check_err(dh.set_reconnect_time_min_ms(reconnect_min_ms))
         if reconnect_max_ms is not None:
             check_err(dh.set_reconnect_time_max_ms(reconnect_max_ms))
-        if recv_timeout is not None:
-            check_err(dh.set_recv_timeout_ms(recv_timeout))
-        if send_timeout is not None:
-            check_err(dh.set_send_timeout_ms(send_timeout))
         if tcp_nodelay is not None:
             check_err(dh.set_nodelay(<cpp_bool>tcp_nodelay))
         if tcp_keepalive is not None:
@@ -956,13 +943,6 @@ cdef class Socket:
         tls:
             A :class:`TlsConfig` for TLS connections.  The object must remain
             alive for the lifetime of the listener.
-        recv_timeout:
-            Receive timeout in ms for pipes accepted by this listener
-            (overrides the socket-level value).  ``-1`` = infinite,
-            ``0`` = non-blocking.
-        send_timeout:
-            Send timeout in ms for pipes accepted by this listener
-            (overrides the socket-level value).
         tcp_nodelay:
             Set ``NNG_OPT_TCP_NODELAY`` on accepted TCP connections.  ``True``
             disables Nagle's algorithm (lower latency, potentially more
@@ -994,10 +974,6 @@ cdef class Socket:
         # Options: if any check_err raises, lh's destructor auto-calls nng_listener_close.
         if tls is not None:
             check_err(lh.set_tls((<TlsConfig?>tls)._get_ptr()))
-        if recv_timeout is not None:
-            check_err(lh.set_recv_timeout_ms(recv_timeout))
-        if send_timeout is not None:
-            check_err(lh.set_send_timeout_ms(send_timeout))
         if tcp_nodelay is not None:
             check_err(lh.set_nodelay(<cpp_bool>tcp_nodelay))
         if tcp_keepalive is not None:

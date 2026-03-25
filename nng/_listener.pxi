@@ -124,46 +124,6 @@ cdef class Listener:
         return port
 
     @property
-    def recv_timeout(self) -> int:
-        """Per-listener receive timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-
-        Overrides the socket-level ``recv_timeout`` for pipes accepted by this
-        listener.  Configured at construction time via :meth:`Socket.add_listener`.
-
-        Raises
-        ------
-        NngClosed
-            If the listener has been closed.
-        """
-        self._check()
-        cdef nng_duration v
-        cdef int rv = self._handle.get_recv_timeout_ms(&v)
-        if rv == NNG_ENOENT: # see start()
-            rv = NNG_ECLOSED
-        check_err(rv)
-        return v
-
-    @property
-    def send_timeout(self) -> int:
-        """Per-listener send timeout in milliseconds (-1 = infinite, 0 = non-blocking).
-
-        Overrides the socket-level ``send_timeout`` for pipes accepted by this
-        listener.  Configured at construction time via :meth:`Socket.add_listener`.
-
-        Raises
-        ------
-        NngClosed
-            If the listener has been closed.
-        """
-        self._check()
-        cdef nng_duration v
-        cdef int rv = self._handle.get_send_timeout_ms(&v)
-        if rv == NNG_ENOENT: # see start()
-            rv = NNG_ECLOSED
-        check_err(rv)
-        return v
-
-    @property
     def tcp_nodelay(self) -> bool:
         """``True`` when TCP_NODELAY (Nagle disabled) is active on this listener.
 

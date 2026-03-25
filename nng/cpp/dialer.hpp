@@ -65,12 +65,7 @@ public:
 
     int id() const noexcept { return nng_dialer_id(_d); }
 
-    int get_recv_timeout_ms(nng_duration* v) const noexcept {
-        return nng_dialer_get_ms(_d, NNG_OPT_RECVTIMEO, v);
-    }
-    int get_send_timeout_ms(nng_duration* v) const noexcept {
-        return nng_dialer_get_ms(_d, NNG_OPT_SENDTIMEO, v);
-    }
+
     int get_reconnect_time_min_ms(nng_duration* v) const noexcept {
         return nng_dialer_get_ms(_d, NNG_OPT_RECONNMINT, v);
     }
@@ -78,12 +73,6 @@ public:
         return nng_dialer_get_ms(_d, NNG_OPT_RECONNMAXT, v);
     }
 
-    int set_recv_timeout_ms(nng_duration v) noexcept {
-        return nng_dialer_set_ms(_d, NNG_OPT_RECVTIMEO, v);
-    }
-    int set_send_timeout_ms(nng_duration v) noexcept {
-        return nng_dialer_set_ms(_d, NNG_OPT_SENDTIMEO, v);
-    }
     int set_reconnect_time_min_ms(nng_duration v) noexcept {
         return nng_dialer_set_ms(_d, NNG_OPT_RECONNMINT, v);
     }
