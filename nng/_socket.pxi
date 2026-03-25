@@ -2134,15 +2134,14 @@ cdef class BusSocket(Socket):
 
     @property
     def recv_buf(self) -> int:
-        """Receive buffer depth (number of queued messages) before blocking/dropping.
+        """Receive buffer depth (number of queued messages) before dropping.
         
         The blocking or dropping behavior depends on the protocol.
 
         The default is 16 for Bus
         
-        A value of 0 means no buffering. The socket will block or drop (depending
-        on protocol) messages until the message can be received successfully
-        from at least one pipe.
+        A value of 0 means no buffering. The socket will drop 
+        messages unless it is actively listening for them.
 
         This value must be an integer between 0 and 8192, inclusive.
         """
@@ -2158,12 +2157,12 @@ cdef class BusSocket(Socket):
 
     @property
     def send_buf(self) -> int:
-        """Send buffer depth (number of queued messages) before blocking.
+        """Send buffer depth (number of queued messages) before dropping.
 
         The default is 16 for Bus.
 
-        A value of 0 means no buffering; the socket will block until the message
-        can be sent successfully to at least one pipe.
+        A value of 0 means no buffering; the socket will drop messages
+        unless the receiver is directly ready to receive them.
 
         This value must be an integer between 0 and 8192, inclusive.
         """
