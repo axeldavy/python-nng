@@ -1588,7 +1588,7 @@ cdef class PairSocket(Socket):
 
         This value must be an integer between 0 and 8192, inclusive.
         """
-        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        self._check()
         cdef int v
         check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
         return v
@@ -1712,7 +1712,7 @@ cdef class SubSocket(Socket):
 
         This value must be an integer between 0 and 8192, inclusive.
         """
-        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        self._check()
         cdef int v
         check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
         return v
@@ -2014,6 +2014,9 @@ cdef class SurveyorSocket(Socket):
         self._check()
         check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_SURVEYOR_SURVEYTIME, ms))
 
+    ''' -> recv_buf and send_buf seem incorrectly plugged in Surveyor (incomplete implementation in NNG).
+    The return values are incorrect, and the code doesn't seem to have the hooks for a change in value
+    to affect anything. Leaving this for now until nng implements it.
     @property
     def recv_buf(self) -> int:
         """Receive buffer depth (number of queued messages) before blocking/dropping.
@@ -2021,10 +2024,11 @@ cdef class SurveyorSocket(Socket):
         The blocking or dropping behavior depends on the protocol.
 
         The default is 128 for Surveyor.
+
+        Note the buffer is not shared and each context get their own.
         
-        A value of 0 means no buffering. The socket will block or drop (depending
-        on protocol) messages until the message can be received successfully
-        from at least one pipe.
+        A value of 0 means no buffering. The socket will drop
+        all incoming messages.
 
         This value must be an integer between 0 and 8192, inclusive.
         """
@@ -2058,6 +2062,8 @@ cdef class SurveyorSocket(Socket):
     def send_buf(self, int n):
         self._check()
         check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
+
+    '''
 
     def open_context(self) -> SurveyorContext:
         """Open an independent surveyor context on this socket."""
@@ -2140,7 +2146,7 @@ cdef class BusSocket(Socket):
 
         This value must be an integer between 0 and 8192, inclusive.
         """
-        self._check() # NOTE: Surveyor seems to have per context recv_buf. Unsure.
+        self._check()
         cdef int v
         check_err(nng_socket_get_int(self._handle.get().raw(), NNG_OPT_RECVBUF, &v))
         return v
