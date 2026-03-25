@@ -731,6 +731,7 @@ cdef class _AioAsyncManager:
                     cb = self._dispatch_callables.pop(op_id, None)
                     if cb is not None:
                         callbacks.append(cb)
+                ready.clear()
 
                 lock.unlock()
 
