@@ -11,8 +11,6 @@ Invoked by main.py — not intended for direct use.
     python main.py          # spawns servers and clients automatically
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os

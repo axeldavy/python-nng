@@ -25,8 +25,6 @@ when using contexts, you should use asend/arecv instead.
 
 """
 
-from __future__ import annotations
-
 import asyncio
 import threading
 import time

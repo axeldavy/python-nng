@@ -1,7 +1,5 @@
 """Statistical utilities for benchmark sample arrays."""
 
-from __future__ import annotations
-
 import math
 from typing import Sequence
 

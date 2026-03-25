@@ -6,8 +6,6 @@ Each thread owns one context on a shared socket, so N requests are in flight
 simultaneously without any event loop.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 

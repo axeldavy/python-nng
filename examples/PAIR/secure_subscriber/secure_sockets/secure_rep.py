@@ -510,6 +510,11 @@ class SecureRepServer(ABC):
             url: NNG transport URL to listen on (e.g. ``"tcp://0.0.0.0:5000"``).
             n_contexts: Number of concurrent receive/reply contexts.  Defaults
                 to 4.
+
+        Note: n_contexts does not limit the number of opened conversations
+        (i.e. connected clients). Clients will just block until a context
+        is free. Having a very large n_contexts doesn't impact performance,
+        besides the _recv_dispatch task startup and cleanup times.
         """
         # Retrieve running loop for threadsafe callbacks
         self._loop = asyncio.get_running_loop()

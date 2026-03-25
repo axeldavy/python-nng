@@ -23,8 +23,6 @@ Usage
 Defaults: M=3 servers, N=4 clients, K=5 requests → 20 messages total.
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os

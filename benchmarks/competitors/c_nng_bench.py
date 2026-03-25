@@ -1,7 +1,5 @@
 """Benchmark competitor: C nng binaries (bench_server + bench_client_*)."""
 
-from __future__ import annotations
-
 import json
 import queue
 import signal

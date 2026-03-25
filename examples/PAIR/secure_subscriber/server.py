@@ -21,8 +21,6 @@ Usage
     python server.py [--transport tcp|ipc|inproc] [--interval SECONDS]
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 from collections.abc import AsyncGenerator

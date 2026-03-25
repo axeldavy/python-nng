@@ -11,8 +11,6 @@ closed when done.
 Use :class: `SecureRepServer` for the server.
 """
 
-from __future__ import annotations
-
 import asyncio
 import os
 from typing import Self

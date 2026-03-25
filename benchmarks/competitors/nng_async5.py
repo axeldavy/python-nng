@@ -10,8 +10,6 @@ No event loop and no blocking waits are used on the critical path; a
 when the chain has finished.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 from concurrent.futures import Future

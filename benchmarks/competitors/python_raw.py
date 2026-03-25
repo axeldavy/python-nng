@@ -17,8 +17,6 @@ but the Python standard library:
   ``reader.readexactly(msg_size)`` so no framing overhead is added.
 """
 
-from __future__ import annotations
-
 import asyncio
 import os
 import queue

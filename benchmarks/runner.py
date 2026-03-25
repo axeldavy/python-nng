@@ -18,8 +18,6 @@ Self-contained competitors (currently only ``c_nng``) launch their own server
 processes internally and bypass this orchestration.
 """
 
-from __future__ import annotations
-
 import gc
 import importlib
 import json

@@ -7,8 +7,6 @@ To this date, python-nng gets higher performance, mainly due
 to compiled C++ (Cython) code for the asyncio machinery, while pynng is pure Python/ffi.
 """
 
-from __future__ import annotations
-
 import asyncio
 import threading
 import time

@@ -1,7 +1,5 @@
 """Benchmark competitor: pynng synchronous REQ/REP."""
 
-from __future__ import annotations
-
 import threading
 import time
 

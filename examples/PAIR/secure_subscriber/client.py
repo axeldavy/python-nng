@@ -21,8 +21,6 @@ Usage
     python client.py [--topics TOPIC [TOPIC ...]] [--transport tcp|ipc|inproc]
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json

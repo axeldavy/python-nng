@@ -17,8 +17,6 @@ Usage
     python bench_overhead.py
 """
 
-from __future__ import annotations
-
 import asyncio
 import pathlib
 import time

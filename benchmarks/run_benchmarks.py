@@ -27,8 +27,6 @@ Reload a previous result and regenerate plots:
         --no-run --plot --markdown
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

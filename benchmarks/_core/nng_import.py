@@ -10,8 +10,6 @@ the duration of the import, ensuring the *installed* package (in site-packages
 or the editable-install build tree) is found instead.
 """
 
-from __future__ import annotations
-
 import importlib
 import sys
 from pathlib import Path

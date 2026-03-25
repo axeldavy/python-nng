@@ -33,8 +33,6 @@ Naming conventions
   modules.
 * Test functions: ``test_<unit>_<scenario>``.
 """
-from __future__ import annotations
-
 import asyncio
 import concurrent.futures
 import threading

@@ -1,7 +1,5 @@
 """Benchmark competitor: ZeroMQ synchronous REQ/REP (pyzmq)."""
 
-from __future__ import annotations
-
 import threading
 import time
 from weakref import WeakValueDictionary

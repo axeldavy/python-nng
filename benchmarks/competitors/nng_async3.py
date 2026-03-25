@@ -5,8 +5,6 @@ to achieve higher throughput uses N parallel contexts to queue more
 messages in flight, and thus achieve higher throughput at the cost of higher latency.
 """
 
-from __future__ import annotations
-
 import asyncio
 import threading
 import time

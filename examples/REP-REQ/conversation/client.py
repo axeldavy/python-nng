@@ -14,8 +14,6 @@ Usage::
     python client.py [--url tcp://127.0.0.1:5555]
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging

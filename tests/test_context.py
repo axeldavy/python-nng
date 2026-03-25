@@ -13,8 +13,6 @@ Covers:
 - SurveyorContext.survey_time inheritance and independence.
 - SubContext.recv_buf inheritance, independence, subscribe/unsubscribe.
 """
-from __future__ import annotations
-
 import asyncio
 import gc
 import time

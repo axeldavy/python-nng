@@ -12,8 +12,6 @@ it is not how you should use python-nng. Indeed the callbacks will run
 on our internal dispatch thread, which you don't want to block with user code.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 from concurrent.futures import Future

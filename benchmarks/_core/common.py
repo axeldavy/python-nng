@@ -1,7 +1,5 @@
 """Shared constants and configuration for the benchmark suite."""
 
-from __future__ import annotations
-
 import asyncio
 import os
 from pathlib import Path

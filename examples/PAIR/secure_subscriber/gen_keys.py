@@ -10,8 +10,6 @@ Re-running will overwrite existing keys.  After running, copy the printed
 public-key hex values into server.py's AUTHORIZED_CLIENT_KEYS list.
 """
 
-from __future__ import annotations
-
 import pathlib
 from nacl.signing import SigningKey
 

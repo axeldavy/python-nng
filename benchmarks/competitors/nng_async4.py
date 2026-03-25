@@ -14,8 +14,6 @@ as REP/REQ discards the previous message if you send a new one before
 receiving the reply.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 

@@ -4,8 +4,6 @@ Blocking send/recv are the fastest way to send/receive messages.
 Indeed they have the least overhead as they avoid the additional future/promise machinery.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 

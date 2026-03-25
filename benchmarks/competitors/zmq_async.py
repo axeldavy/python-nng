@@ -1,7 +1,5 @@
 """Benchmark competitor: ZeroMQ async REQ/REP via zmq.asyncio (pyzmq)."""
 
-from __future__ import annotations
-
 import asyncio
 import threading
 import time

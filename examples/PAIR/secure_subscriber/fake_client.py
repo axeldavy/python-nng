@@ -10,8 +10,6 @@ The server will refuse the subscription and send back an error response.
 This script will log the rejection and exit cleanly with a non-zero status.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import pathlib

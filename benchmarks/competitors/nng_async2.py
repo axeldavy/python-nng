@@ -5,8 +5,6 @@ They are slightly slower than arecv_ready/asend_ready, but have fewer potential
 pitfalls to handle.
 """
 
-from __future__ import annotations
-
 import asyncio
 import threading
 import time

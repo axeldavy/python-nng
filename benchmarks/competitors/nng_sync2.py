@@ -5,8 +5,6 @@ They are slightly slower than blocking send/recv, but can be used to wait
 later on completion.
 """
 
-from __future__ import annotations
-
 import time
 
 from .._core.nng_import import import_nng

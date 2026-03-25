@@ -12,8 +12,6 @@ against the known ``SERVER_VERIFY_KEY``, the signature check fails and the
 client aborts before ever connecting to the PAIR socket.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import pathlib
