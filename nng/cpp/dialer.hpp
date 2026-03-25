@@ -72,12 +72,18 @@ public:
     int get_reconnect_time_max_ms(nng_duration* v) const noexcept {
         return nng_dialer_get_ms(_d, NNG_OPT_RECONNMAXT, v);
     }
+    int get_recv_max_size(size_t* v) const noexcept {
+        return nng_dialer_get_size(_d, NNG_OPT_RECVMAXSZ, v);
+    }
 
     int set_reconnect_time_min_ms(nng_duration v) noexcept {
         return nng_dialer_set_ms(_d, NNG_OPT_RECONNMINT, v);
     }
     int set_reconnect_time_max_ms(nng_duration v) noexcept {
         return nng_dialer_set_ms(_d, NNG_OPT_RECONNMAXT, v);
+    }
+    int set_recv_max_size(size_t v) noexcept {
+        return nng_dialer_set_size(_d, NNG_OPT_RECVMAXSZ, v);
     }
     int set_tls(nng_tls_config* cfg) noexcept {
         return nng_dialer_set_tls(_d, cfg);

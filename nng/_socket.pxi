@@ -733,22 +733,6 @@ cdef class Socket:
         check_err(nng_socket_set_ms(self._handle.get().raw(), NNG_OPT_SENDTIMEO, ms))
 
     @property
-    def recv_max_size(self) -> int: # TODO: doc says setting at socket level is depreciated and should move to dialer/listener at creation
-        """Maximum incoming message size in bytes (0 = no limit).
-        
-        Message beyond the limit will be discarded.
-        """
-        self._check()
-        cdef size_t v
-        check_err(nng_socket_get_size(self._handle.get().raw(), NNG_OPT_RECVMAXSZ, &v))
-        return v
-
-    @recv_max_size.setter
-    def recv_max_size(self, size_t n):
-        self._check()
-        check_err(nng_socket_set_size(self._handle.get().raw(), NNG_OPT_RECVMAXSZ, n))
-
-    @property
     def recv_fd(self) -> int:
         """Readable file descriptor for external poll / epoll / kqueue.
 
@@ -789,6 +773,7 @@ cdef class Socket:
                    tls=None,
                    reconnect_min_ms=None,
                    reconnect_max_ms=None,
+                   recv_max_size=None,
                    tcp_nodelay=None,
                    tcp_keepalive=None,
                    tcp_local_addr=None) -> Dialer:
@@ -842,6 +827,10 @@ cdef class Socket:
             Maximum reconnect interval in ms.  Retries use exponential
             back-off capped at this value.  ``0`` (default) means use
             *reconnect_min_ms* as a fixed interval.
+        recv_max_size:
+            Maximum incoming message size in bytes (Default: 0 = no limit).
+            Messages beyond the limit will be discarded. Use this to
+            protect against misbehaving peers sending huge messages.
         tcp_nodelay:
             Set ``NNG_OPT_TCP_NODELAY`` on the TCP connection.  ``True``
             disables Nagle's algorithm (lower latency, potentially more
@@ -894,14 +883,15 @@ cdef class Socket:
         if tcp_local_addr is not None:
             sa = _ip_str_to_sockaddr(str(tcp_local_addr))
             check_err(dh.set_local_addr(&sa))
+        if recv_max_size is not None:
+            check_err(dh.set_recv_max_size(recv_max_size))
         cdef Dialer obj = Dialer.create(move(dh), self)
         self._dialers.append(obj)
         return obj
 
     def add_listener(self, url, *,
                      tls=None,
-                     recv_timeout=None,
-                     send_timeout=None,
+                     recv_max_size=None,
                      tcp_nodelay=None,
                      tcp_keepalive=None) -> Listener:
         """Create, configure, and register an inbound :class:`Listener` for *url*.
@@ -910,7 +900,7 @@ cdef class Socket:
         start accepting connections yet.  Call :meth:`Listener.start` on the
         returned object to begin listening::
 
-            lst = sock.add_listener("tcp://0.0.0.0:5555", recv_timeout=5000)
+            lst = sock.add_listener("tcp://0.0.0.0:5555")
             lst.start()
 
             # or as a one-liner:
@@ -943,6 +933,10 @@ cdef class Socket:
         tls:
             A :class:`TlsConfig` for TLS connections.  The object must remain
             alive for the lifetime of the listener.
+        recv_max_size:
+            Maximum incoming message size in bytes (Default: 0 = no limit).
+            Messages beyond the limit will be discarded. Use this to
+            protect against misbehaving peers sending huge messages.
         tcp_nodelay:
             Set ``NNG_OPT_TCP_NODELAY`` on accepted TCP connections.  ``True``
             disables Nagle's algorithm (lower latency, potentially more
@@ -974,6 +968,8 @@ cdef class Socket:
         # Options: if any check_err raises, lh's destructor auto-calls nng_listener_close.
         if tls is not None:
             check_err(lh.set_tls((<TlsConfig?>tls)._get_ptr()))
+        if recv_max_size is not None:
+            check_err(lh.set_recv_max_size(recv_max_size))
         if tcp_nodelay is not None:
             check_err(lh.set_nodelay(<cpp_bool>tcp_nodelay))
         if tcp_keepalive is not None:

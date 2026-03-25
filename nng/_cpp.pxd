@@ -138,8 +138,10 @@ cdef extern from "nng/cpp/dialer.hpp" namespace "nng_cpp" nogil:
         int id()
         int get_reconnect_time_min_ms(nng_duration* v)
         int get_reconnect_time_max_ms(nng_duration* v)
+        int get_recv_max_size(size_t* v)
         int set_reconnect_time_min_ms(nng_duration v)
         int set_reconnect_time_max_ms(nng_duration v)
+        int set_recv_max_size(size_t v)
         int set_tls(nng_tls_config* cfg)
         int start(int flags)
         int get_nodelay(cpp_bool* v)
@@ -167,6 +169,8 @@ cdef extern from "nng/cpp/listener.hpp" namespace "nng_cpp" nogil:
         int set_nodelay(cpp_bool v)
         int get_keepalive(cpp_bool* v)
         int set_keepalive(cpp_bool v)
+        int get_recv_max_size(size_t* v)
+        int set_recv_max_size(size_t v)
         nng_listener raw()
 
 # ── ContextHandle ─────────────────────────────────────────────────────────────
