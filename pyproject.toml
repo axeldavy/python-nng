@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "High-performance Python bindings for nng (nanomsg-next-gen)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = [
+    "LICENSE",
+    "thirdparty/nng/LICENSE.txt",
+]
 keywords = ["nng", "nanomsg", "messaging", "pubsub", "ipc", "request-reply"]
 authors = [
     { name = "Axel Davy" },
@@ -16,7 +20,6 @@ authors = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
