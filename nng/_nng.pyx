@@ -218,7 +218,7 @@ _atexit.register(_nng_fini)
 
 include "_errors.pxi"    # NngError hierarchy, check_err()
 include "_message.pxi"   # Message: zero-copy nng_msg* wrapper
-include "_tls.pxi"       # TlsConfig, TlsCert
+include "_tls.pxi"       # TlsCert, TlsConfig, tls_engine_name, tls_engine_description
 include "_aio_async.pxi"       # _AioCbASync, _aio_cb_async_trampoline
 include "_aio_cb_sync.pxi"        # _AioCbSync, _aio_cb_sync_trampoline
 include "_context.pxi"   # Context (nng_ctx)

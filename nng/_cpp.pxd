@@ -81,6 +81,9 @@ cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
         int          self_addr(nng_sockaddr& sa)
         cpp_bool     get_nodelay()
         cpp_bool     get_keepalive()
+        cpp_bool     get_tls_verified()
+        const char*  get_tls_peer_cn()
+        cpp_bool     get_peer_cert_der(const uint8_t** buf, size_t* sz)
         int          get_status()
         void         set_status(int s)
         bint operator==(const PipeHandle& o)
@@ -114,7 +117,7 @@ cdef extern from "nng/cpp/tls_config.hpp" namespace "nng_cpp" nogil:
         nng_tls_config* get()
         bint is_valid()
         @staticmethod
-        unique_ptr[TlsConfigHandle] alloc(nng_tls_mode mode, int& err)
+        shared_ptr[TlsConfigHandle] alloc(nng_tls_mode mode, int& err)
 
 # ── factory.hpp – cross-handle creation free functions ────────────────────────
 
@@ -142,7 +145,7 @@ cdef extern from "nng/cpp/dialer.hpp" namespace "nng_cpp" nogil:
         int set_reconnect_time_min_ms(nng_duration v)
         int set_reconnect_time_max_ms(nng_duration v)
         int set_recv_max_size(size_t v)
-        int set_tls(nng_tls_config* cfg)
+        int set_tls(shared_ptr[TlsConfigHandle] cfg)
         int start(int flags)
         int get_nodelay(cpp_bool* v)
         int set_nodelay(cpp_bool v)
@@ -163,7 +166,7 @@ cdef extern from "nng/cpp/listener.hpp" namespace "nng_cpp" nogil:
         int close()
         int id()
         int get_port(int*)
-        int set_tls(nng_tls_config* cfg)
+        int set_tls(shared_ptr[TlsConfigHandle] cfg)
         int start()
         int get_nodelay(cpp_bool* v)
         int set_nodelay(cpp_bool v)

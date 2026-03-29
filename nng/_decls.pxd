@@ -24,7 +24,7 @@ cdef extern from "nng/nng.h":
     ctypedef struct nng_msg:          pass
     ctypedef struct nng_aio:          pass
     ctypedef struct nng_tls_config:   pass
-    ctypedef struct nng_tls_cert_s:   pass
+    ctypedef struct nng_tls_cert:   pass
     ctypedef struct nng_url:          pass
     ctypedef struct nng_stat:         pass
     ctypedef struct nng_thread:       pass
@@ -358,14 +358,14 @@ cdef extern from "nng/nng.h":
     nng_pipe nng_msg_get_pipe   (const nng_msg *) nogil
 
     # ── Pipe ──────────────────────────────────────────────────────────────────
-    nng_err nng_pipe_get_bool  (nng_pipe, const char *, bint *)     nogil
+    nng_err nng_pipe_get_bool  (nng_pipe, const char *, cpp_bool *) nogil
     nng_err nng_pipe_get_int   (nng_pipe, const char *, int *)      nogil
     nng_err nng_pipe_get_ms    (nng_pipe, const char *, nng_duration *) nogil
     nng_err nng_pipe_get_size  (nng_pipe, const char *, size_t *)   nogil
     nng_err nng_pipe_get_string(nng_pipe, const char *, const char **) nogil
     nng_err nng_pipe_peer_addr (nng_pipe, nng_sockaddr *)           nogil
     nng_err nng_pipe_self_addr (nng_pipe, nng_sockaddr *)           nogil
-    nng_err nng_pipe_peer_cert (nng_pipe, nng_tls_cert_s **)        nogil
+    nng_err nng_pipe_peer_cert (nng_pipe, nng_tls_cert **)        nogil
     nng_err nng_pipe_close     (nng_pipe)                           nogil
     int     nng_pipe_id        (nng_pipe)                           nogil
     nng_socket   nng_pipe_socket  (nng_pipe) nogil
@@ -483,8 +483,6 @@ cdef extern from "nng/nng.h":
     int  nng_tls_config_server_name(nng_tls_config *, const char *)        nogil
     int  nng_tls_config_ca_chain   (nng_tls_config *, const char *, const char *) nogil
     int  nng_tls_config_own_cert   (nng_tls_config *, const char *, const char *, const char *) nogil
-    int  nng_tls_config_key        (nng_tls_config *, const uint8_t *, size_t) nogil
-    int  nng_tls_config_pass       (nng_tls_config *, const char *)        nogil
     int  nng_tls_config_auth_mode  (nng_tls_config *, nng_tls_auth_mode)   nogil
     int  nng_tls_config_ca_file    (nng_tls_config *, const char *)        nogil
     int  nng_tls_config_cert_key_file(nng_tls_config *, const char *, const char *) nogil
@@ -492,16 +490,21 @@ cdef extern from "nng/nng.h":
     int  nng_tls_config_psk        (nng_tls_config *, const char *, const uint8_t *, size_t) nogil
 
     # ── TLS cert ──────────────────────────────────────────────────────────────
-    nng_err nng_tls_cert_parse_pem(nng_tls_cert_s **, const char *, size_t) nogil
-    nng_err nng_tls_cert_parse_der(nng_tls_cert_s **, const uint8_t *, size_t) nogil
-    void    nng_tls_cert_der       (nng_tls_cert_s *, uint8_t *, size_t *) nogil
-    void    nng_tls_cert_free      (nng_tls_cert_s *)                       nogil
-    nng_err nng_tls_cert_subject   (nng_tls_cert_s *, char **)              nogil
-    nng_err nng_tls_cert_issuer    (nng_tls_cert_s *, char **)              nogil
-    nng_err nng_tls_cert_serial_number(nng_tls_cert_s *, char **)           nogil
-    nng_err nng_tls_cert_subject_cn(nng_tls_cert_s *, char **)              nogil
-    nng_err nng_tls_cert_not_before(nng_tls_cert_s *, tm *)                 nogil
-    nng_err nng_tls_cert_not_after (nng_tls_cert_s *, tm *)                 nogil
+    nng_err nng_tls_cert_parse_pem(nng_tls_cert **, const char *, size_t) nogil
+    nng_err nng_tls_cert_parse_der(nng_tls_cert **, const uint8_t *, size_t) nogil
+    void    nng_tls_cert_der       (nng_tls_cert *, uint8_t *, size_t *) nogil
+    void    nng_tls_cert_free      (nng_tls_cert *)                       nogil
+    nng_err nng_tls_cert_subject   (nng_tls_cert *, char **)              nogil
+    nng_err nng_tls_cert_issuer    (nng_tls_cert *, char **)              nogil
+    nng_err nng_tls_cert_serial_number(nng_tls_cert *, char **)           nogil
+    nng_err nng_tls_cert_subject_cn(nng_tls_cert *, char **)              nogil
+    nng_err nng_tls_cert_not_before(nng_tls_cert *, tm *)                 nogil
+    nng_err nng_tls_cert_not_after (nng_tls_cert *, tm *)                 nogil
+    nng_err nng_tls_cert_next_alt  (nng_tls_cert *, char **)              nogil
+
+    # ── TLS engine info ───────────────────────────────────────────────────────
+    const char *nng_tls_engine_name()        nogil
+    const char *nng_tls_engine_description() nogil
 
     # ── Protocol open functions ───────────────────────────────────────────────
     int nng_bus0_open       (nng_socket *) nogil

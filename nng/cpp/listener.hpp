@@ -11,6 +11,7 @@
 #include <memory>
 #include <nng/nng.h>
 #include "socket.hpp"
+#include "tls_config.hpp"
 
 namespace nng_cpp {
 
@@ -75,8 +76,11 @@ public:
     int set_recv_max_size(size_t v) noexcept {
         return nng_listener_set_size(_l, NNG_OPT_RECVMAXSZ, v);
     }
-    int set_tls(nng_tls_config* cfg) noexcept {
-        return nng_listener_set_tls(_l, cfg);
+    // Takes shared ownership of the TLS config so the listener keeps it alive
+    // for its own lifetime, regardless of Python GC on the TlsConfig object.
+    int set_tls(std::shared_ptr<TlsConfigHandle> cfg) noexcept {
+        _tls_cfg = std::move(cfg);
+        return nng_listener_set_tls(_l, _tls_cfg->get());
     }
     int start() noexcept { return nng_listener_start(_l, 0); }
 
@@ -107,7 +111,8 @@ private:
     }
 
     nng_listener                    _l;
-    std::shared_ptr<SocketHandle>   _socket; // keeps socket alive while listener lives
+    std::shared_ptr<SocketHandle>   _socket;     // keeps socket alive while listener lives
+    std::shared_ptr<TlsConfigHandle> _tls_cfg;   // keeps TLS config alive while listener lives
 };
 
 } // namespace nng_cpp

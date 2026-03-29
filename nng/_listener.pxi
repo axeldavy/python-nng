@@ -50,6 +50,9 @@ cdef class Listener:
         check_nng_init()
         # _handle default-constructed (empty) by Cython's C++ member glue.
 
+    def __init__(self):
+        raise RuntimeError("Listener cannot be instantiated directly. Use Socket.add_listener() instead.")
+
     @staticmethod
     cdef Listener create(ListenerHandle lh, Socket sock):
         """Take ownership of an already-created ListenerHandle."""

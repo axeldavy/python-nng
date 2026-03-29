@@ -9,6 +9,7 @@ All public symbols are re-exported from this package::
         SurveyorSocket, RespondentSocket,
         BusSocket,
         Message, Context, Dialer, Listener,
+        TlsCert,
         TlsConfig,
         NngError, NngTimeout, NngConnectionRefused,
         PIPE_EV_ADD_PRE, PIPE_EV_ADD_POST, PIPE_EV_REM_POST,
@@ -51,7 +52,7 @@ from nng._nng import (
     SurveyorContext,
     Dialer,
     Listener,
-    Pipe,    PipeStatus,    TlsConfig,
+    Pipe,    PipeStatus,    TlsCert,    TlsConfig,
     SocketAddr,
 
     # ── Errors ───────────────────────────────────────────────────────────
@@ -78,6 +79,8 @@ from nng._nng import (
     TLS_AUTH_REQUIRED,
     TLS_VERSION_1_2,
     TLS_VERSION_1_3,
+    tls_engine_name,
+    tls_engine_description,
 
     # ── Utility functions ─────────────────────────────────────────────────
     version,
@@ -95,7 +98,7 @@ __all__ = [
     "BusSocket",
     # Types
     "Message", "Context", "ReqContext", "SubContext", "SurveyorContext",
-    "Dialer", "Listener", "Pipe", "PipeStatus", "TlsConfig", "SocketAddr",
+    "Dialer", "Listener", "Pipe", "PipeStatus", "TlsCert", "TlsConfig", "SocketAddr",
     # Errors
     "NngError", "NngTimeout", "NngConnectionRefused", "NngClosed",
     "NngAgain", "NngNotSupported", "NngAddressInUse", "NngPermission",
@@ -107,6 +110,7 @@ __all__ = [
     # TLS
     "TLS_AUTH_NONE", "TLS_AUTH_OPTIONAL", "TLS_AUTH_REQUIRED",
     "TLS_VERSION_1_2", "TLS_VERSION_1_3",
+    "tls_engine_name", "tls_engine_description",
     # Utilities
     "version", "random", "initialize",
 ]

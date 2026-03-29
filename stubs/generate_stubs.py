@@ -68,6 +68,11 @@ PARAM_TYPES: dict[str, str] = {
     "password":           "str | None",
     "path":               "str",
     "name":               "str",
+    "raw_key":            "bytes",
+    "identity":           "str",
+    "psks":               "dict[str, bytes]",
+    "min_version":        "int | None",
+    "max_version":        "int | None",
     # Socket.add_dialer / add_listener kwonly opts
     "reconnect_min_ms":   "int | None",
     "reconnect_max_ms":   "int | None",
@@ -155,14 +160,17 @@ RETURN_TYPES: dict[tuple[str | None, str], str] = {
     (None, "unsubscribe"):  "None",
     (None, "get_peer_addr"): "SocketAddr",
     (None, "get_self_addr"): "SocketAddr",
-    # TlsConfig fluent interface
-    ("TlsConfig", "server_name"):   "TlsConfig",
-    ("TlsConfig", "ca_chain"):      "TlsConfig",
-    ("TlsConfig", "own_cert"):      "TlsConfig",
-    ("TlsConfig", "ca_file"):       "TlsConfig",
-    ("TlsConfig", "cert_key_file"): "TlsConfig",
-    ("TlsConfig", "auth_mode"):     "TlsConfig",
-    ("TlsConfig", "version"):       "TlsConfig",
+    # TlsConfig factories
+    ("TlsConfig", "for_client"):     "TlsConfig",
+    ("TlsConfig", "for_server"):     "TlsConfig",
+    ("TlsConfig", "for_psk_client"): "TlsConfig",
+    ("TlsConfig", "for_psk_server"): "TlsConfig",
+    # TlsCert factories and methods
+    ("TlsCert", "from_pem"):        "TlsCert",
+    ("TlsCert", "from_der"):        "TlsCert",
+    ("TlsCert", "to_der"):          "bytes",
+    # Pipe TLS methods
+    ("Pipe", "get_peer_cert"):      "TlsCert | None",
     # Socket factory methods
     ("Socket", "add_dialer"):   "Dialer",
     ("Socket", "add_listener"): "Listener",
@@ -201,6 +209,17 @@ PROP_TYPES: dict[tuple[str | None, str], str] = {
     (None, "port"):           "int",
     (None, "tcp_keepalive"): "bool",
     (None, "tcp_nodelay"): "bool",
+    # TlsCert certificate properties
+    (None, "subject"):       "str",
+    (None, "issuer"):        "str",
+    (None, "serial_number"): "str",
+    (None, "subject_cn"):    "str",
+    (None, "alt_names"):     "list[str]",
+    (None, "not_before"):    "datetime.datetime",
+    (None, "not_after"):     "datetime.datetime",
+    # Pipe TLS properties
+    (None, "tls_verified"): "bool",
+    (None, "tls_peer_cn"):  "str | None",
 }
 
 # Read-write properties: (class_name, prop_name).  All others are read-only.
@@ -237,9 +256,32 @@ WRITABLE_PROPS: set[tuple[str, str]] = {
 
 # Full parameter-string overrides for methods where signature introspection
 # cannot reconstruct the correct signature (e.g. Cython __init__ with defaults).
-# Values are complete param strings (including 'self').
+# Values are complete param strings (including 'self' or 'cls').
 HARDCODED_PARAM_STRINGS: dict[tuple[str, str], str] = {
     ("Message", "__init__"): "self, data: bytes | Buffer | bytearray | str | None = None, *, size: int = 0",
+    ("TlsConfig", "for_client"): (
+        "cls, *, server_name: str | None = None, ca_pem: str | None = None,"
+        " crl_pem: str | None = None, ca_file: str | None = None,"
+        " cert_pem: str | None = None, key_pem: str | None = None,"
+        " cert_file: str | None = None, password: str | None = None,"
+        " auth_mode: int | None = None, min_version: int | None = None,"
+        " max_version: int | None = None"
+    ),
+    ("TlsConfig", "for_server"): (
+        "cls, *, cert_pem: str | None = None, key_pem: str | None = None,"
+        " cert_file: str | None = None, password: str | None = None,"
+        " ca_pem: str | None = None, crl_pem: str | None = None,"
+        " ca_file: str | None = None, auth_mode: int | None = None,"
+        " min_version: int | None = None, max_version: int | None = None"
+    ),
+    ("TlsConfig", "for_psk_client"): (
+        "cls, identity: str, key: bytes, *,"
+        " min_version: int | None = None, max_version: int | None = None"
+    ),
+    ("TlsConfig", "for_psk_server"): (
+        "cls, psks: dict[str, bytes], *,"
+        " min_version: int | None = None, max_version: int | None = None"
+    ),
 }
 
 
@@ -395,19 +437,24 @@ def _emit_method(
     method_name: str,
     method_obj: object,
     indent: str = I1,
+    *,
+    is_classmethod: bool = False,
 ) -> list[str]:
     """Return stub lines for one method."""
     lines: list[str] = []
 
+    # Unwrap classmethod descriptor before introspection
+    raw_obj = method_obj.__func__ if is_classmethod and hasattr(method_obj, "__func__") else method_obj
+
     # Signature
     try:
-        sig = inspect.signature(method_obj)
+        sig = inspect.signature(raw_obj)
     except (ValueError, TypeError):
         sig = None
 
-    is_async = inspect.iscoroutinefunction(method_obj)
+    is_async = inspect.iscoroutinefunction(raw_obj)
     is_async_gen = (
-        inspect.isasyncgenfunction(method_obj)
+        inspect.isasyncgenfunction(raw_obj)
         or method_name in ASYNC_GENERATORS
     )
     # Async generators are 'def' returning AsyncGenerator, not 'async def'
@@ -422,11 +469,15 @@ def _emit_method(
     elif sig is not None:
         param_str = _build_param_str(class_name, method_name, sig)
     else:
-        param_str = "self, *args: Any, **kwargs: Any"
+        first = "cls" if is_classmethod else "self"
+        param_str = f"{first}, *args: Any, **kwargs: Any"
 
+    if is_classmethod:
+        lines.append(f"{indent}@classmethod")
     lines.append(f"{indent}{prefix}def {method_name}({param_str}) -> {ret}:")
 
-    doc = _getdoc(method_obj)
+    # Use the docstring from the underlying Cython function, not 'classmethod' descriptor
+    doc = _getdoc(raw_obj)
     if doc:
         lines.extend(_format_doc(doc, indent + I1))
     lines.append(f"{indent}{I1}...")
@@ -550,8 +601,9 @@ def emit_class(cls: type) -> list[str]:
     for mname in method_names:
         if mname == "__init__":
             continue
-        mobj = cls.__dict__[mname]
-        lines.extend(_emit_method(class_name, mname, mobj))
+        desc = cls.__dict__[mname]
+        is_cm = isinstance(desc, classmethod)
+        lines.extend(_emit_method(class_name, mname, desc, is_classmethod=is_cm))
         lines.append("")
         has_content = True
 
@@ -581,7 +633,7 @@ def emit_module_constants() -> list[str]:
 
 def emit_module_functions() -> list[str]:
     lines: list[str] = ["# Module-level functions", ""]
-    fn_names = ["version", "random", "initialize"]
+    fn_names = ["version", "random", "initialize", "tls_engine_name", "tls_engine_description"]
     for fname in fn_names:
         fn = getattr(_mod, fname, None)
         if fn is None:
@@ -693,6 +745,7 @@ def emit_pipe_status() -> list[str]:
 # Classes emitted in dependency order (referenced types appear before use)
 _CLASS_ORDER = [
     "Message",
+    "TlsCert",
     "TlsConfig",
     "SocketAddr",
     "Pipe",
@@ -725,6 +778,7 @@ _HEADER = '''\
 # Re-run the script after changing any .pxi / .pyx source.
 
 import concurrent.futures
+import datetime
 import sys
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, ClassVar, Self

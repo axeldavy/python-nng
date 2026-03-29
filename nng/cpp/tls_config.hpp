@@ -29,13 +29,15 @@ public:
     // ── Static factory ───────────────────────────────────────────────────
 
     // Allocate a TLS config for the given mode (client or server).
-    // On success returns a non-null unique_ptr and sets err=0.
+    // On success returns a non-null shared_ptr and sets err=0.
     // On failure returns nullptr and sets err to the nng error code.
-    static std::unique_ptr<TlsConfigHandle> alloc(nng_tls_mode mode, int& err) noexcept {
+    // shared_ptr (not unique_ptr) so dialers/listeners can co-own the handle
+    // without requiring the Python TlsConfig object to stay alive.
+    static std::shared_ptr<TlsConfigHandle> alloc(nng_tls_mode mode, int& err) noexcept {
         nng_tls_config* cfg = nullptr;
         err = nng_tls_config_alloc(&cfg, mode);
         if (err != 0) return nullptr;
-        return std::make_unique<TlsConfigHandle>(cfg);
+        return std::make_shared<TlsConfigHandle>(cfg);
     }
 
 private:

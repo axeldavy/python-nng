@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <nng/nng.h>
 
@@ -28,6 +29,7 @@ public:
           _peer_addr{}, _peer_addr_err(0),
           _self_addr{}, _self_addr_err(0),
           _nodelay(true), _keepalive(false),
+          _tls_verified(false),
           _status(0) {}
 
     // Capture all metadata while the nng_pipe handle is still valid.
@@ -42,11 +44,42 @@ public:
           _self_addr{},
           _self_addr_err(nng_pipe_self_addr(p, &_self_addr)),
           _nodelay(true), _keepalive(false),
+          _tls_verified(false),
           _status(0) {
         // Cache TCP boolean options; ignore errors (non-TCP transports return
         // NNG_ENOTSUP and the defaults of true/false are correct in that case).
         nng_pipe_get_bool(p, NNG_OPT_TCP_NODELAY,   &_nodelay);
         nng_pipe_get_bool(p, NNG_OPT_TCP_KEEPALIVE, &_keepalive);
+
+        // ── TLS snapshot (captured once; valid after the pipe handle dies) ─
+
+        // Was the peer certificate verified?
+        nng_pipe_get_bool(p, NNG_OPT_TLS_VERIFIED, &_tls_verified);
+
+        // Common name from the peer certificate (empty string if non-TLS).
+        // nng_pipe_get_string returns a pointer to nng-managed storage (not
+        // an allocated copy), so it must NOT be freed by the caller.
+        {
+            const char* cn = nullptr;
+            if (nng_pipe_get_string(p, NNG_OPT_TLS_PEER_CN, &cn) == 0 && cn) {
+                _tls_peer_cn = cn;
+            }
+        }
+
+        // DER encoding of the peer certificate (empty if non-TLS / no cert).
+        {
+            nng_tls_cert* cert = nullptr;
+            if (nng_pipe_peer_cert(p, &cert) == 0 && cert != nullptr) {
+                size_t der_size = 0;
+                nng_tls_cert_der(cert, nullptr, &der_size);
+                if (der_size > 0) {
+                    _peer_cert_der.resize(der_size);
+                    nng_tls_cert_der(cert, _peer_cert_der.data(), &der_size);
+                    _peer_cert_der.resize(der_size);
+                }
+                nng_tls_cert_free(cert);
+            }
+        }
     }
 
     // Non-copyable: each PipeHandle instance corresponds to exactly one pipe.
@@ -102,6 +135,30 @@ public:
     // Whether TCP_KEEPALIVE was active at connection time.
     bool get_keepalive() const noexcept { return _keepalive; }
 
+    // ── TLS properties (cached at connection time, no nng calls) ──────────
+
+    // Whether the peer TLS certificate was verified at connection time.
+    // Always false for non-TLS pipes.
+    bool get_tls_verified() const noexcept { return _tls_verified; }
+
+    // Common name (CN) from the peer certificate, or nullptr for non-TLS
+    // pipes / connections without a peer certificate.
+    // The returned pointer is valid for the lifetime of this PipeHandle.
+    const char* get_tls_peer_cn() const noexcept {
+        return _tls_peer_cn.empty() ? nullptr : _tls_peer_cn.c_str();
+    }
+
+    // Returns true if a peer certificate DER blob was captured, filling
+    // *buf and *sz.  *buf points into this PipeHandle's internal storage;
+    // the pointer is valid for the lifetime of this PipeHandle.
+    // Returns false for non-TLS pipes or connections without a peer cert.
+    bool get_peer_cert_der(const uint8_t** buf, size_t* sz) const noexcept {
+        if (_peer_cert_der.empty()) return false;
+        *buf = _peer_cert_der.data();
+        *sz  = _peer_cert_der.size();
+        return true;
+    }
+
     // ── Status (managed by PipeCollection) ──────────────────────────────
 
     int  get_status() const noexcept { return _status; }
@@ -124,6 +181,9 @@ private:
     int          _self_addr_err;
     bool         _nodelay;                 // TCP_NODELAY at connection time
     bool         _keepalive;              // TCP_KEEPALIVE at connection time
+    bool         _tls_verified;           // TLS peer cert verified at connection time
+    std::string  _tls_peer_cn;            // TLS peer CN (empty if non-TLS / no cert)
+    std::vector<uint8_t> _peer_cert_der;  // DER of peer cert (empty if non-TLS / no cert)
     int          _status;
 };
 
@@ -231,7 +291,7 @@ private:
 
 // ── Data ─────────────────────────────────────────────────────────────
     std::vector<std::shared_ptr<PipeHandle>> _pipes;
-    mutable std::mutex                               _mutex;
+    mutable std::mutex                       _mutex;
     bool                                     _had_events = false;
 };
 

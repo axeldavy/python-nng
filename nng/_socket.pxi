@@ -274,6 +274,54 @@ cdef class Pipe:
             raise RuntimeError("Invalid Pipe")
         return bool(self._handle.get().get_keepalive())
 
+    @property
+    def tls_verified(self) -> bool:
+        """``True`` when the peer's TLS certificate was successfully verified.
+
+        Returns ``False`` for non-TLS pipes or when peer verification was not
+        required / did not take place.  Captured once at pipe creation.
+        """
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+        return bool(self._handle.get().get_tls_verified())
+
+    @property
+    def tls_peer_cn(self) -> str | None:
+        """Common name (CN) from the peer's TLS certificate, or ``None``.
+
+        Returns ``None`` for non-TLS pipes or when no certificate was
+        presented.  Captured once at pipe creation.
+        """
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+        cdef const char *s = self._handle.get().get_tls_peer_cn()
+        if s is NULL:
+            return None
+        return s.decode("utf-8", errors="replace")
+
+    def get_peer_cert(self) -> TlsCert | None:
+        """Return the peer's TLS certificate, or ``None`` for non-TLS pipes.
+
+        The certificate data is captured at pipe creation time and is
+        fully independent of the pipe's lifetime.  The returned
+        :class:`TlsCert` is an **owning** object; it is safe to keep it
+        after the pipe is closed.
+
+        Returns:
+            An owning :class:`TlsCert`, or ``None`` if this is not a TLS
+            pipe or no certificate was presented.
+        """
+        if not self._handle:
+            raise RuntimeError("Invalid Pipe")
+
+        cdef const uint8_t *buf = NULL
+        cdef size_t sz = 0
+        if not self._handle.get().get_peer_cert_der(&buf, &sz):
+            return None
+
+        # Parse the cached DER bytes into a new TlsCert.
+        return TlsCert.from_der(PyBytes_FromStringAndSize(<const char*>buf, sz))
+
     cdef object handle_status_change(self):
         """Check the current status of this pipe and return the callback to call if any."""
         # Fail silently on invalid pipe
@@ -818,8 +866,7 @@ cdef class Socket:
             * ``ws://host:port/path`` — WebSocket.
             * ``wss://host:port/path`` — WebSocket over TLS.
         tls:
-            A :class:`TlsConfig` for TLS connections.  The object must remain
-            alive for the lifetime of the dialer.
+            A :class:`TlsConfig` for TLS connections.
         reconnect_min_ms:
             Minimum reconnect interval in ms (default: 100).  After a
             disconnect the dialer waits at least this long before retrying.
@@ -871,7 +918,7 @@ cdef class Socket:
         check_err(err)
         # Options: if any check_err raises, dh's destructor auto-calls nng_dialer_close.
         if tls is not None:
-            check_err(dh.set_tls((<TlsConfig?>tls)._get_ptr()))
+            check_err(dh.set_tls((<TlsConfig?>tls)._handle))
         if reconnect_min_ms is not None:
             check_err(dh.set_reconnect_time_min_ms(reconnect_min_ms))
         if reconnect_max_ms is not None:
@@ -931,8 +978,7 @@ cdef class Socket:
             * ``ws://addr:port/path`` — WebSocket.
             * ``wss://addr:port/path`` — WebSocket over TLS.
         tls:
-            A :class:`TlsConfig` for TLS connections.  The object must remain
-            alive for the lifetime of the listener.
+            A :class:`TlsConfig` for TLS connections.
         recv_max_size:
             Maximum incoming message size in bytes (Default: 0 = no limit).
             Messages beyond the limit will be discarded. Use this to
@@ -967,7 +1013,7 @@ cdef class Socket:
         check_err(err)
         # Options: if any check_err raises, lh's destructor auto-calls nng_listener_close.
         if tls is not None:
-            check_err(lh.set_tls((<TlsConfig?>tls)._get_ptr()))
+            check_err(lh.set_tls((<TlsConfig?>tls)._handle))
         if recv_max_size is not None:
             check_err(lh.set_recv_max_size(recv_max_size))
         if tcp_nodelay is not None:

@@ -2,6 +2,7 @@
 # Re-run the script after changing any .pxi / .pyx source.
 
 import concurrent.futures
+import datetime
 import sys
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, ClassVar, Self
@@ -309,6 +310,10 @@ class Message:
         """Return self>value."""
         ...
 
+    def __hash__(self) -> int:
+        """Return hash(self)."""
+        ...
+
     def __le__(self, value: Any) -> Any:
         """Return self<=value."""
         ...
@@ -338,6 +343,189 @@ class Message:
         ...
 
 
+class TlsCert:
+    """
+    X.509 certificate from a TLS peer or parsed from PEM/DER.
+        
+    """
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Raise TypeError — use the class-method factories."""
+        ...
+
+    @property
+    def alt_names(self) -> list[str]:
+        """
+        Subject Alternative Names (SANs), if any.
+
+        Returns an ordered list of SAN strings.  DNS names appear as plain
+        hostnames (``'example.com'``); IP addresses as ``'IP:192.0.2.1'``.
+        Returns an empty list when no SANs are present.
+
+        .. note::
+            NNG iterates SANs with a stateful internal cursor.  This property
+            drains all names on the **first** call and caches the result;
+            subsequent calls return the same cached list.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: On unexpected errors from the TLS engine.
+        """
+        ...
+
+    @property
+    def issuer(self) -> str:
+        """
+        Full issuer distinguished name.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: If the TLS engine does not support this attribute.
+        """
+        ...
+
+    @property
+    def not_after(self) -> datetime.datetime:
+        """
+        Certificate validity end time as a UTC-aware :class:`datetime`.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: If the TLS engine does not support this attribute.
+        """
+        ...
+
+    @property
+    def not_before(self) -> datetime.datetime:
+        """
+        Certificate validity start time as a UTC-aware :class:`datetime`.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: If the TLS engine does not support this attribute.
+        """
+        ...
+
+    @property
+    def serial_number(self) -> str:
+        """
+        Serial number as a colon-separated hex string, e.g. ``'01:ab:cd:...'``.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: If the TLS engine does not support this attribute.
+        """
+        ...
+
+    @property
+    def subject(self) -> str:
+        """
+        Full subject distinguished name, e.g. ``'CN=example.com,O=Acme'``.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: If the TLS engine does not support this attribute.
+        """
+        ...
+
+    @property
+    def subject_cn(self) -> str:
+        """
+        Common name (CN) from the subject, e.g. ``'example.com'``.
+
+        Modern certificates prefer Subject Alternative Names (SANs) over CN
+        for identity.  Use :attr:`alt_names` when verifying host identity.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+            NngError: If the TLS engine does not support this attribute.
+        """
+        ...
+
+    @classmethod
+    def from_der(cls: Any, der: Any) -> TlsCert:
+        """
+        Parse a DER-encoded X.509 certificate.
+
+        Args:
+            der: Raw DER bytes of the certificate.
+
+        Returns:
+            A new :class:`TlsCert`.
+
+        Raises:
+            NngError: If the DER is invalid or no TLS engine is loaded.
+        """
+        ...
+
+    @classmethod
+    def from_pem(cls: Any, pem: Any) -> TlsCert:
+        """
+        Parse a PEM-encoded X.509 certificate.
+
+        Args:
+            pem: PEM text (``str`` or ``bytes``).  When multiple certificates
+                are concatenated only the first is used.
+
+        Returns:
+            A new :class:`TlsCert`.
+
+        Raises:
+            NngError: If the PEM is invalid or no TLS engine is loaded.
+        """
+        ...
+
+    def to_der(self) -> bytes:
+        """
+        Export the certificate as DER-encoded bytes.
+
+        Useful for interoperability with other crypto libraries (OpenSSL,
+        mbedTLS, etc.).
+
+        Returns:
+            Raw DER bytes.
+
+        Raises:
+            ValueError: If the certificate pointer is null.
+        """
+        ...
+
+    def __bool__(self) -> bool:
+        """True if self else False"""
+        ...
+
+    def __eq__(self, value: Any) -> bool:
+        """Return self==value."""
+        ...
+
+    def __ge__(self, value: Any) -> Any:
+        """Return self>=value."""
+        ...
+
+    def __gt__(self, value: Any) -> Any:
+        """Return self>value."""
+        ...
+
+    def __hash__(self) -> int:
+        """Return hash(self)."""
+        ...
+
+    def __le__(self, value: Any) -> Any:
+        """Return self<=value."""
+        ...
+
+    def __lt__(self, value: Any) -> Any:
+        """Return self<value."""
+        ...
+
+    def __ne__(self, value: Any) -> bool:
+        """Return self!=value."""
+        ...
+
+    def __repr__(self) -> str:
+        """Return repr(self)."""
+        ...
+
+
 class TlsConfig:
     """
     TLS configuration object for securing nng connections.
@@ -345,186 +533,202 @@ class TlsConfig:
     Pass as the ``tls=`` argument to :meth:`Socket.add_dialer` or
     :meth:`Socket.add_listener`.
 
+    Instances are created exclusively through the class-method factories:
+
+    * :meth:`for_client` — certificate-based TLS client.
+    * :meth:`for_server` — certificate-based TLS server.
+    * :meth:`for_psk_client` — PSK-based TLS client.
+    * :meth:`for_psk_server` — PSK-based TLS server (multiple identities).
+
     A single :class:`TlsConfig` may be shared across multiple dialers and
-    listeners.  However, once a configuration is attached to a service for
-    the first time, it becomes **read-only**: any further attempt to modify
-    it (call any method on it) will raise an error.
+    listeners.  Once attached to a started dialer or listener the
+    configuration is locked by nng and cannot be changed.
+
+    **PSK engine compatibility**
+
+    :meth:`for_psk_client` and :meth:`for_psk_server` are supported by all
+    bundled engines, with one caveat: wolfSSL requires the
+    ``NNG_SUPP_TLS_PSK`` compile-time flag; calling these factories on such a
+    build raises :exc:`NngNotSupported`.
 
     Example (mTLS client)::
 
-        cfg = TlsConfig(server=False)    # client mode (default)
-        cfg.server_name("example.com")   # SNI + cert hostname check
-        cfg.ca_chain(ca_pem)             # CA to validate the server
-        cfg.own_cert(cert_pem, key_pem)  # client certificate for mTLS
+        cfg = TlsConfig.for_client(
+            server_name="example.com",
+            ca_pem=ca_bundle,
+            cert_pem=my_cert,
+            key_pem=my_key,
+        )
         sock.add_dialer("tls+tcp://example.com:5555", tls=cfg).start()
 
     Example (TLS server)::
 
-        cfg = TlsConfig(server=True)
-        cfg.cert_key_file("/etc/ssl/server.pem")
+        cfg = TlsConfig.for_server(cert_file="/etc/ssl/server.pem")
         sock.add_listener("tls+tcp://0.0.0.0:5555", tls=cfg).start()
     """
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Raise TypeError — use the class-method factories."""
         ...
 
-    def auth_mode(self, mode: int) -> TlsConfig:
+    @classmethod
+    def for_client(cls, *, server_name: str | None = None, ca_pem: str | None = None, crl_pem: str | None = None, ca_file: str | None = None, cert_pem: str | None = None, key_pem: str | None = None, cert_file: str | None = None, password: str | None = None, auth_mode: int | None = None, min_version: int | None = None, max_version: int | None = None) -> TlsConfig:
         """
-        Set the peer certificate verification mode.
+        Create a :class:`TlsConfig` for certificate-based TLS client use.
 
-        *mode* must be one of the module-level constants:
+        All parameters are keyword-only and optional; supply only those
+        relevant to your use case.
 
-        * ``TLS_AUTH_NONE`` — no peer authentication.  Default for **server**
-          configurations, where clients typically don't present certificates.
-        * ``TLS_AUTH_OPTIONAL`` — verify the peer's certificate if one is
-          presented; allow the session to proceed even if none is given.
-        * ``TLS_AUTH_REQUIRED`` — the peer **must** present a valid certificate;
-          connections without one are rejected.  Default for **client**
-          configurations.
-        """
-        ...
+        Args:
+            server_name: Expected server hostname for SNI and cert verification.
+            ca_pem:      PEM-encoded CA certificates for peer verification.
+                         Multiple certificates can be concatenated.
+            crl_pem:     PEM-encoded CRL to pair with *ca_pem*.  wolfSSL
+                         ignores this unless compiled with
+                         ``NNG_WOLFSSL_HAVE_CRL``.
+            ca_file:     Path to a PEM file with CA certs (and optional CRLs).
+            cert_pem:    PEM-encoded client certificate (requires *key_pem*).
+            key_pem:     PEM-encoded private key for *cert_pem*.  Encrypted
+                         keys require *password*.
+            cert_file:   Path to a PEM file containing both cert and key.
+                         Encrypted keys require *password*.
+            password:    Passphrase to decrypt *key_pem* or the key in
+                         *cert_file*.
+            auth_mode:   One of the ``TLS_AUTH_*`` constants.  Defaults to
+                         ``TLS_AUTH_REQUIRED``.
+            min_version: Minimum TLS version (``TLS_VERSION_1_2`` or
+                         ``TLS_VERSION_1_3``).
+            max_version: Maximum TLS version.  wolfSSL ignores this argument.
 
-    def ca_chain(self, cert_pem: str, crl_pem: str | None = None) -> TlsConfig:
-        """
-        Add a CA certificate chain (and optional CRL) used to validate peers.
+        Returns:
+            A new :class:`TlsConfig` in client mode.
 
-        *cert_pem* is a PEM string containing one or more X.509 CA
-        certificates; multiple certificates may be concatenated, with the
-        leaf listed first.
-
-        *crl_pem* is an optional PEM string containing a certificate
-        revocation list (CRL) for the associated authority.  Pass ``None``
-        to omit.
-
-        This method may be called **multiple times** to add additional chains
-        without affecting those already added.
-
-        .. note::
-            CA certificates **must** be configured when the authentication
-            mode is ``TLS_AUTH_REQUIRED`` (the default for clients).
-        """
-        ...
-
-    def ca_file(self, path: str) -> TlsConfig:
-        """
-        Load CA certificates (and optional CRLs) from a PEM file.
-
-        The file at *path* must contain at least one X.509 certificate in PEM
-        format and may contain multiple certificates as well as zero or more
-        PEM CRL objects.  This information is used to validate peer
-        certificates.
-
-        This method may be called **multiple times** to add additional chains
-        without affecting those already loaded.
-
-        .. note::
-            CA certificates **must** be configured when the authentication
-            mode is ``TLS_AUTH_REQUIRED`` (the default for clients).
+        Raises:
+            ValueError: If *crl_pem* is set without *ca_pem*.
+            NngCryptoError: If a certificate or private key cannot be parsed.
+            NngNoMemory: If a memory allocation fails.
+            NngNotSupported: If *min_version*/*max_version* specifies a TLS
+                version unsupported by the active engine.
+            NngError: If *ca_file* or *cert_file* cannot be opened
+                (``NNG_ENOENT``) or read (``NNG_EACCESS``).
         """
         ...
 
-    def cert_key_file(self, path: str, password: str | None = None) -> TlsConfig:
+    @classmethod
+    def for_psk_client(cls, identity: str, key: bytes, *, min_version: int | None = None, max_version: int | None = None) -> TlsConfig:
         """
-        Load our own certificate and private key from a PEM file.
+        Create a :class:`TlsConfig` for PSK-based TLS client use.
 
-        The file at *path* must contain both the certificate (or chain) and
-        the matching private key in PEM format.  When a chain is present,
-        the leaf certificate should appear first; the self-signed root may
-        be omitted.
+        Pre-shared key (PSK) is an alternative to certificate-based
+        authentication that requires no CA infrastructure.
 
-        If the private key is encrypted, supply the decryption *password*;
-        pass ``None`` otherwise.
+        *identity* is a printable string (up to ~64 bytes) that acts as a
+        public identifier for this client.  Embedded NUL bytes are not
+        supported.
 
-        On **server** configurations this method may be called **multiple
-        times** to register certificates for different cryptographic
-        algorithms (e.g. RSA and ECDSA).  On **client** configurations it
-        should only be called once.
-        """
-        ...
+        *key* is the shared secret used to derive session keys.  mbedTLS and
+        wolfSSL limit key length to ``MBEDTLS_PSK_MAX_LEN`` (typically
+        32 bytes); prefer 16–32 byte keys for widest compatibility.
 
-    def own_cert(self, cert_pem: str, key_pem: str, password: str | None = None) -> TlsConfig:
-        """
-        Configure our own certificate and private key (PEM strings).
+        Certificate verification is **disabled** automatically.  Pure PSK
+        ciphersuites do not exchange certificates, so requiring one would
+        cause the TLS handshake to fail.
 
-        *cert_pem* is the local certificate (or chain) in PEM format.  When
-        providing a chain, list the leaf certificate first; the self-signed
-        root may be omitted because the peer must already have it.
+        Args:
+            identity:    PSK identity string (analogous to a username).
+            key:         PSK secret bytes.
+            min_version: Minimum TLS version (``TLS_VERSION_1_2`` or
+                         ``TLS_VERSION_1_3``).
+            max_version: Maximum TLS version.  wolfSSL ignores this argument.
 
-        *key_pem* is the matching private key in PEM format.  If the key is
-        encrypted, supply the decryption *password*; pass ``None`` otherwise.
+        Returns:
+            A new :class:`TlsConfig` in client mode.
 
-        .. warning::
-            This method must only be called **once** per configuration object.
-            Calling it a second time raises an error.  Use
-            :meth:`cert_key_file` instead, which supports multiple calls on
-            server configurations.
-        """
-        ...
-
-    def psk(self, identity: Any, key: Any) -> Any:
-        """
-        Configure a pre-shared key (PSK) for TLS connections.
-
-        PSK is an alternative to certificate-based authentication.
-
-        *identity* is a printable string that acts as a public identifier
-        (similar to a user name).  Embedded NUL bytes are not supported.
-        Typical implementations support identities up to 64 bytes.
-
-        *key* is the secret bytes used to derive session keys.  Typical
-        implementations support keys up to 32 bytes.
-
-        In **client** mode this method should be called **once** to set the
-        client's own identity and key.
-
-        In **server** mode this method may be called **multiple times** to
-        register keys for different clients; the server will look up the
-        appropriate key when a client connects using its identity.
-
-        .. note::
-            PSK support depends on the underlying TLS engine.  Not all
-            engines expose this functionality.
+        Raises:
+            NngNotSupported: On wolfSSL when ``NNG_SUPP_TLS_PSK`` is not set.
+            NngCryptoError: If the key or identity is rejected by the engine.
+            NngNoMemory: If a memory allocation fails.
         """
         ...
 
-    def server_name(self, name: str) -> TlsConfig:
+    @classmethod
+    def for_psk_server(cls, psks: dict[str, bytes], *, min_version: int | None = None, max_version: int | None = None) -> TlsConfig:
         """
-        Set the expected remote server name (client mode only).
+        Create a :class:`TlsConfig` for PSK-based TLS server use.
 
-        Used in two ways:
+        PSK server configurations accept multiple client identities.  *psks*
+        maps each identity string to its corresponding key bytes.
 
-        * **Certificate verification**: the supplied *name* is matched against
-          the identity presented in the server's certificate.
-        * **SNI hint**: when Server Name Indication is used, *name* is sent
-          to the server so it can select the appropriate certificate.
+        When a PSK client connects, the engine looks up the client's identity
+        in *psks* and uses the matching key to complete the handshake.
 
-        .. note::
-            This method is only meaningful when the configuration is used in
-            client mode.
-        """
-        ...
+        Args:
+            psks:        ``{identity: key}`` mapping of PSK pairs.  Must not
+                         be empty.
+            min_version: Minimum TLS version (``TLS_VERSION_1_2`` or
+                         ``TLS_VERSION_1_3``).
+            max_version: Maximum TLS version.  wolfSSL ignores this argument.
 
-    def version(self, min_ver: int, max_ver: int) -> TlsConfig:
-        """
-        Restrict the allowed TLS protocol versions.
+        Returns:
+            A new :class:`TlsConfig` in server mode.
 
-        *min_ver* and *max_ver* must be the module-level constants
-        ``TLS_VERSION_1_2`` or ``TLS_VERSION_1_3``.  Both endpoints negotiate
-        the highest mutually supported version in the allowed range.
-
-        When this method is **not called**, nng defaults to accepting both
-        TLS 1.2 and TLS 1.3 (subject to what the underlying TLS engine
-        supports).
-
-        .. note::
-            Only TLS 1.2 and 1.3 are supported.  SSL and earlier TLS versions
-            are insecure and rejected by nng.  Some engines may not support
-            restricting the *maximum* version.  0-RTT resumption is not
-            supported.
+        Raises:
+            ValueError: If *psks* is empty.
+            NngNotSupported: On wolfSSL when ``NNG_SUPP_TLS_PSK`` is not set.
+            NngCryptoError: If a key or identity is rejected by the engine.
+            NngNoMemory: If a memory allocation fails.
         """
         ...
 
-    def __repr__(self) -> str:
-        """Return repr(self)."""
+    @classmethod
+    def for_server(cls, *, cert_pem: str | None = None, key_pem: str | None = None, cert_file: str | None = None, password: str | None = None, ca_pem: str | None = None, crl_pem: str | None = None, ca_file: str | None = None, auth_mode: int | None = None, min_version: int | None = None, max_version: int | None = None) -> TlsConfig:
+        """
+        Create a :class:`TlsConfig` for certificate-based TLS server use.
+
+        All parameters are keyword-only and optional; supply only those
+        relevant to your use case.
+
+        On **mbedTLS** and **OpenSSL** a server may register multiple
+        cert+key pairs (e.g. RSA + ECDSA) so the engine can select the best
+        match per client.  This factory supports a single pair; for
+        multi-algorithm servers assemble the config with the C API directly.
+        On wolfSSL, *cert_pem* / *cert_file* replaces any previously set cert.
+
+        Args:
+            cert_pem:    PEM-encoded server certificate (requires *key_pem*).
+            key_pem:     PEM-encoded private key for *cert_pem*.  Encrypted
+                         keys require *password*.
+            cert_file:   Path to a PEM file containing both cert and key.
+            password:    Passphrase to decrypt the private key.
+            ca_pem:      PEM-encoded CA certificates for client cert
+                         verification (mTLS).  Required when *auth_mode* is
+                         not ``TLS_AUTH_NONE``.
+            crl_pem:     PEM-encoded CRL to pair with *ca_pem*.  wolfSSL
+                         ignores this unless compiled with
+                         ``NNG_WOLFSSL_HAVE_CRL``.
+            ca_file:     Path to a PEM file with CA certs for client
+                         verification.
+            auth_mode:   One of the ``TLS_AUTH_*`` constants.  Defaults to
+                         ``TLS_AUTH_NONE``.
+            min_version: Minimum TLS version (``TLS_VERSION_1_2`` or
+                         ``TLS_VERSION_1_3``).
+            max_version: Maximum TLS version.  wolfSSL ignores this argument.
+
+        Returns:
+            A new :class:`TlsConfig` in server mode.
+
+        Raises:
+            ValueError: If *crl_pem* is set without *ca_pem*.
+            NngCryptoError: If a certificate or private key cannot be parsed.
+            NngNoMemory: If a memory allocation fails.
+            NngNotSupported: If *min_version*/*max_version* specifies a TLS
+                version unsupported by the active engine.
+            NngError: If *ca_file* or *cert_file* cannot be opened
+                (``NNG_ENOENT``) or read (``NNG_EACCESS``).
+        """
+        ...
+
+    def __repr__(self, *args: Any, **kwargs: Any) -> str:
+        """Return a debug string for this config."""
         ...
 
 
@@ -640,6 +844,26 @@ class Pipe:
         """
         ...
 
+    @property
+    def tls_peer_cn(self) -> str | None:
+        """
+        Common name (CN) from the peer's TLS certificate, or ``None``.
+
+        Returns ``None`` for non-TLS pipes or when no certificate was
+        presented.  Captured once at pipe creation.
+        """
+        ...
+
+    @property
+    def tls_verified(self) -> bool:
+        """
+        ``True`` when the peer's TLS certificate was successfully verified.
+
+        Returns ``False`` for non-TLS pipes or when peer verification was not
+        required / did not take place.  Captured once at pipe creation.
+        """
+        ...
+
     def close(self) -> None:
         """
         Forcibly close this connection.
@@ -657,6 +881,21 @@ class Pipe:
 
     def get_peer_addr(self) -> SocketAddr:
         """Remote peer address."""
+        ...
+
+    def get_peer_cert(self) -> TlsCert | None:
+        """
+        Return the peer's TLS certificate, or ``None`` for non-TLS pipes.
+
+        The certificate data is captured at pipe creation time and is
+        fully independent of the pipe's lifetime.  The returned
+        :class:`TlsCert` is an **owning** object; it is safe to keep it
+        after the pipe is closed.
+
+        Returns:
+            An owning :class:`TlsCert`, or ``None`` if this is not a TLS
+            pipe or no certificate was presented.
+        """
         ...
 
     def get_self_addr(self) -> SocketAddr:
@@ -740,6 +979,9 @@ class Dialer:
             d.start()
             ...
     """
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
     @property
     def id(self) -> int:
         """The numeric dialer ID, or 0 if the dialer has been closed."""
@@ -922,6 +1164,9 @@ class Listener:
             technique for service discovery when combined with an out-of-band mechanism to share the port number
             with clients (e.g. a well-known "discovery" socket or an external service registry).
     """
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
     @property
     def id(self) -> int:
         """The numeric listener ID, or 0 if the listener has been closed."""
@@ -1395,17 +1640,6 @@ class Socket:
         ...
 
     @property
-    def recv_max_size(self) -> int:
-        """
-        Maximum incoming message size in bytes (0 = no limit).
-
-        Message beyond the limit will be discarded.
-        """
-        ...
-    @recv_max_size.setter
-    def recv_max_size(self, value: int) -> None: ...
-
-    @property
     def recv_timeout(self) -> int:
         """
         Receive timeout in ms (-1 = infinite, 0 = non-blocking).
@@ -1442,7 +1676,7 @@ class Socket:
     @send_timeout.setter
     def send_timeout(self, value: int) -> None: ...
 
-    def add_dialer(self, url: str | bytes, *, tls: TlsConfig | None = None, reconnect_min_ms: int | None = None, reconnect_max_ms: int | None = None, tcp_nodelay: bool | None = None, tcp_keepalive: bool | None = None, tcp_local_addr: str | None = None) -> Dialer:
+    def add_dialer(self, url: str | bytes, *, tls: TlsConfig | None = None, reconnect_min_ms: int | None = None, reconnect_max_ms: int | None = None, recv_max_size: Any = None, tcp_nodelay: bool | None = None, tcp_keepalive: bool | None = None, tcp_local_addr: str | None = None) -> Dialer:
         """
         Create, configure, and register an outbound :class:`Dialer` for *url*.
 
@@ -1485,8 +1719,7 @@ class Socket:
             * ``ws://host:port/path`` — WebSocket.
             * ``wss://host:port/path`` — WebSocket over TLS.
         tls:
-            A :class:`TlsConfig` for TLS connections.  The object must remain
-            alive for the lifetime of the dialer.
+            A :class:`TlsConfig` for TLS connections.
         reconnect_min_ms:
             Minimum reconnect interval in ms (default: 100).  After a
             disconnect the dialer waits at least this long before retrying.
@@ -1494,6 +1727,10 @@ class Socket:
             Maximum reconnect interval in ms.  Retries use exponential
             back-off capped at this value.  ``0`` (default) means use
             *reconnect_min_ms* as a fixed interval.
+        recv_max_size:
+            Maximum incoming message size in bytes (Default: 0 = no limit).
+            Messages beyond the limit will be discarded. Use this to
+            protect against misbehaving peers sending huge messages.
         tcp_nodelay:
             Set ``NNG_OPT_TCP_NODELAY`` on the TCP connection.  ``True``
             disables Nagle's algorithm (lower latency, potentially more
@@ -1528,7 +1765,7 @@ class Socket:
         """
         ...
 
-    def add_listener(self, url: str | bytes, *, tls: TlsConfig | None = None, recv_timeout: int | None = None, send_timeout: int | None = None, tcp_nodelay: bool | None = None, tcp_keepalive: bool | None = None) -> Listener:
+    def add_listener(self, url: str | bytes, *, tls: TlsConfig | None = None, recv_max_size: Any = None, tcp_nodelay: bool | None = None, tcp_keepalive: bool | None = None) -> Listener:
         """
         Create, configure, and register an inbound :class:`Listener` for *url*.
 
@@ -1536,7 +1773,7 @@ class Socket:
         start accepting connections yet.  Call :meth:`Listener.start` on the
         returned object to begin listening::
 
-            lst = sock.add_listener("tcp://0.0.0.0:5555", recv_timeout=5000)
+            lst = sock.add_listener("tcp://0.0.0.0:5555")
             lst.start()
 
             # or as a one-liner:
@@ -1567,8 +1804,11 @@ class Socket:
             * ``ws://addr:port/path`` — WebSocket.
             * ``wss://addr:port/path`` — WebSocket over TLS.
         tls:
-            A :class:`TlsConfig` for TLS connections.  The object must remain
-            alive for the lifetime of the listener.
+            A :class:`TlsConfig` for TLS connections.
+        recv_max_size:
+            Maximum incoming message size in bytes (Default: 0 = no limit).
+            Messages beyond the limit will be discarded. Use this to
+            protect against misbehaving peers sending huge messages.
         tcp_nodelay:
             Set ``NNG_OPT_TCP_NODELAY`` on accepted TCP connections.  ``True``
             disables Nagle's algorithm (lower latency, potentially more
@@ -2104,41 +2344,6 @@ class SurveyorSocket(Socket):
     other contexts.
     """
     @property
-    def recv_buf(self) -> int:
-        """
-        Receive buffer depth (number of queued messages) before blocking/dropping.
-
-        The blocking or dropping behavior depends on the protocol.
-
-        The default is 128 for Surveyor.
-
-        A value of 0 means no buffering. The socket will block or drop (depending
-        on protocol) messages until the message can be received successfully
-        from at least one pipe.
-
-        This value must be an integer between 0 and 8192, inclusive.
-        """
-        ...
-    @recv_buf.setter
-    def recv_buf(self, value: int) -> None: ...
-
-    @property
-    def send_buf(self) -> int:
-        """
-        Send buffer depth (number of queued messages) before blocking.
-
-        The default is 8 for Surveyor.
-
-        A value of 0 means no buffering; the socket will block until the message
-        can be sent successfully to at least one pipe.
-
-        This value must be an integer between 0 and 8192, inclusive.
-        """
-        ...
-    @send_buf.setter
-    def send_buf(self, value: int) -> None: ...
-
-    @property
     def survey_time(self) -> int:
         """
         Survey deadline in milliseconds.
@@ -2206,15 +2411,14 @@ class BusSocket(Socket):
     @property
     def recv_buf(self) -> int:
         """
-        Receive buffer depth (number of queued messages) before blocking/dropping.
+        Receive buffer depth (number of queued messages) before dropping.
 
         The blocking or dropping behavior depends on the protocol.
 
         The default is 16 for Bus
 
-        A value of 0 means no buffering. The socket will block or drop (depending
-        on protocol) messages until the message can be received successfully
-        from at least one pipe.
+        A value of 0 means no buffering. The socket will drop 
+        messages unless it is actively listening for them.
 
         This value must be an integer between 0 and 8192, inclusive.
         """
@@ -2225,12 +2429,12 @@ class BusSocket(Socket):
     @property
     def send_buf(self) -> int:
         """
-        Send buffer depth (number of queued messages) before blocking.
+        Send buffer depth (number of queued messages) before dropping.
 
         The default is 16 for Bus.
 
-        A value of 0 means no buffering; the socket will block until the message
-        can be sent successfully to at least one pipe.
+        A value of 0 means no buffering; the socket will drop messages
+        unless the receiver is directly ready to receive them.
 
         This value must be an integer between 0 and 8192, inclusive.
         """
@@ -2283,5 +2487,29 @@ def initialize(*, num_task_threads: int = 0, max_task_threads: int = -1, num_exp
         num_resolver_threads – fixed number of DNS resolver threads (0 = auto)
 
     Raises RuntimeError if nng is already initialised or if nng_init() fails.
+    """
+    ...
+
+def tls_engine_name() -> Any:
+    """
+    Return the short name of the currently loaded TLS engine.
+
+    Returns ``'none'`` when no TLS engine has been registered (i.e.
+    the library was built without TLS support).
+
+    Returns:
+        A short identifier string, e.g. ``'mbed'``, ``'openssl'``, or
+        ``'wolf'``.
+    """
+    ...
+
+def tls_engine_description() -> Any:
+    """
+    Return a human-readable description of the currently loaded TLS engine.
+
+    Returns an empty string when no TLS engine has been registered.
+
+    Returns:
+        A free-form description string, e.g. ``'mbedTLS 3.6.2'``.
     """
     ...

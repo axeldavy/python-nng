@@ -547,6 +547,16 @@ cdef class Message:
             return "Message(<transferred>)"
         return f"Message(len={self._handle.body_len()})"
 
+    def __hash__(self) -> int:
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._lock)
+
+        self._check_validity()
+
+        # Hash the body bytes for now. We could consider hashing the header too
+        # in the future if there are use cases for that.
+        return hash(memoryview(self))
+
     def __len__(self) -> int:
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._lock)

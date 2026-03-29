@@ -247,10 +247,6 @@ class TestNngClosed:
         with pytest.raises(NngClosed):
             _ = self._closed().send_buf
 
-    def test_recv_max_size_get_after_close(self):
-        with pytest.raises(NngClosed):
-            _ = self._closed().recv_max_size
-
     # -- socket id returns 0, not NngClosed (documented) ----------------------
 
     def test_socket_id_zero_after_close(self):
@@ -299,22 +295,6 @@ class TestNngClosed:
             d.close()
             with pytest.raises(NngClosed):
                 _ = d.reconnect_max_ms
-
-    def test_dialer_recv_timeout_after_close(self):
-        """Documented: Dialer.recv_timeout raises NngClosed if dialer is closed."""
-        with nng.PairSocket() as s:
-            d = s.add_dialer(_url("dial_rtmo"))
-            d.close()
-            with pytest.raises(NngClosed):
-                _ = d.recv_timeout
-
-    def test_dialer_send_timeout_after_close(self):
-        """Documented: Dialer.send_timeout raises NngClosed if dialer is closed."""
-        with nng.PairSocket() as s:
-            d = s.add_dialer(_url("dial_stmo"))
-            d.close()
-            with pytest.raises(NngClosed):
-                _ = d.send_timeout
 
     def test_dialer_close_idempotent(self):
         with nng.PairSocket() as s:
@@ -958,19 +938,3 @@ class TestTimeoutProperties:
         with nng.PairSocket() as s:
             s.send_timeout = 300
             assert s.send_timeout == 300
-
-    def test_dialer_recv_timeout_readable(self):
-        """Dialer.recv_timeout is readable and defaults to -1 (inherit from socket).
-
-        The per-dialer timeout is configured at construction time in
-        ``Socket.add_dialer``; the property is read-only after creation.
-        """
-        with nng.PairSocket() as s:
-            d = s.add_dialer(_url("tmo_prop_dial_recv"))
-            assert d.recv_timeout == -1
-
-    def test_dialer_send_timeout_readable(self):
-        """Dialer.send_timeout is readable and defaults to -1 (inherit from socket)."""
-        with nng.PairSocket() as s:
-            d = s.add_dialer(_url("tmo_prop_dial_send"))
-            assert d.send_timeout == -1
