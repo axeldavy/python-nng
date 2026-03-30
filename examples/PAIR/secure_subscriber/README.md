@@ -23,8 +23,7 @@ The server sends back to the client exclusive PAIR addresses for each feed, alon
 The client opens a secure PAIR connection to each feed address, providing as well the one-time token to prove that it is the same client that made the subscription request.
 The server then sends the events to the client over the PAIR connection.
 
-This system allows the server to only prepare the feeds needed by clients, and by the occasion shows
-one way to implement a secure handshake and encrypted channel on top of NNG using PyNaCl.
+This system allows the server to only prepare the feeds needed by clients, and by the occasion shows one way to implement a secure handshake and encrypted channel on top of NNG using PyNaCl.
 
 Besides the security aspect, the demo also shows how to write a REP server which maintains an independent stateful conversation with each of its clients (while the basic REP/REQ pattern treats each request as independent and stateless).
 ---
@@ -174,13 +173,18 @@ with existing certificate infrastructure.
 model (any cert signed by the CA is accepted); no built-in application-level allowlist.
 
 ```python
-tls = nng.TlsConfig(server=True)
-tls.set_server_cert_key_pem(cert_pem, key_pem)
-tls.set_ca_chain_pem(ca_pem)
-tls.set_auth_mode(nng.TLS_AUTH_REQUIRED)
+tls = TlsConfig.for_server(
+    cert_pem=cert_pem,
+    key_pem=key_pem,
+    ca_pem=ca_pem,
+    auth_mode=TLS_AUTH_REQUIRED,
+    min_version=TLS_VERSION_1_3,
+)
 
 listener = socket.listen("tls+tcp://0.0.0.0:5555", tls=tls)
 ```
+
+Note the Pypi package isn't built with TLS support, so the README for TLS support.
 
 ### ZeroMQ CURVE
 
