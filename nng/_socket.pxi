@@ -1618,6 +1618,14 @@ cdef class PairSocket(Socket):
     lacks hop-count headers and is required when interoperating with older
     implementations such as *libnanomsg* or *mangos*.
 
+    *Warning*: if the peer gets disconnected, messages can be lost.
+    For instance if the other peer is already connected to a different
+    peer, the connection will be rejected after being accepted for
+    a brief moment. Even though the connection will succeed for real after the
+    other peer disconnects, the messages sent during the brief moment
+    of connection will be lost. In other words, any hello/identity
+    first message may have to be resent if the pipe disconnects.
+
     Parameters
     ----------
     v0:
