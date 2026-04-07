@@ -1,4 +1,4 @@
-"""python_raw — raw Python baseline competitor.
+"""python_raw_async — raw Python baseline competitor (asyncio).
 
 Measures the absolute floor of communication latency/throughput using nothing
 but the Python standard library:
@@ -227,10 +227,10 @@ async def _tcp_ops(host: str, port: int, msg_size: int, duration_s: float) -> fl
 # Competitor class
 # ---------------------------------------------------------------------------
 
-class PythonRawBenchmark(BaseBenchmark):
+class PythonRawAsyncBenchmark(BaseBenchmark):
     """Baseline: raw Python inproc (queue.Queue) and TCP (asyncio streams)."""
 
-    name = "python_raw"
+    name = "python_raw_async"
 
     # ---- Server ------------------------------------------------------------
 
@@ -275,7 +275,7 @@ class PythonRawBenchmark(BaseBenchmark):
     ) -> list[float]:
         if transport_url.startswith("ipc://"):
             if not _IPC_SUPPORTED:
-                raise NotImplementedError("ipc not supported for python_raw on Windows")
+                raise NotImplementedError("ipc not supported for python_raw_async on Windows")
             path = _parse_ipc_url(transport_url)
             return asyncio.run(_ipc_latency(path, msg_size, n_warmup, n_iters))
 
@@ -308,7 +308,7 @@ class PythonRawBenchmark(BaseBenchmark):
     ) -> float:
         if transport_url.startswith("ipc://"):
             if not _IPC_SUPPORTED:
-                raise NotImplementedError("ipc not supported for python_raw on Windows")
+                raise NotImplementedError("ipc not supported for python_raw_async on Windows")
             path = _parse_ipc_url(transport_url)
             return asyncio.run(_ipc_ops(path, msg_size, duration_s))
 
@@ -332,4 +332,4 @@ class PythonRawBenchmark(BaseBenchmark):
         raise ValueError(f"Unsupported URL scheme: {transport_url!r}")
 
 
-COMPETITORS["python_raw"] = PythonRawBenchmark
+COMPETITORS["python_raw_async"] = PythonRawAsyncBenchmark

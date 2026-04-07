@@ -1,4 +1,4 @@
-"""python_raw2 — raw Python baseline competitor using blocking socket APIs.
+"""python_raw_sync — raw Python baseline competitor using blocking socket APIs.
 
 Like :mod:`python_raw` but replaces asyncio with synchronous, blocking socket
 calls for the ipc and tcp transports:
@@ -219,10 +219,10 @@ def _tcp_ops(host: str, port: int, msg_size: int, duration_s: float) -> float:
 # Competitor class
 # ---------------------------------------------------------------------------
 
-class PythonRaw2Benchmark(BaseBenchmark):
+class PythonRawSyncBenchmark(BaseBenchmark):
     """Baseline: raw Python inproc (queue.Queue) and blocking socket streams."""
 
-    name = "python_raw2"
+    name = "python_raw_sync"
 
     # ---- Server ------------------------------------------------------------
 
@@ -266,7 +266,7 @@ class PythonRaw2Benchmark(BaseBenchmark):
     ) -> list[float]:
         if transport_url.startswith("ipc://"):
             if not _IPC_SUPPORTED:
-                raise NotImplementedError("ipc not supported for python_raw2 on Windows")
+                raise NotImplementedError("ipc not supported for python_raw_sync on Windows")
             path = _parse_ipc_url(transport_url)
             return _ipc_latency(path, msg_size, n_warmup, n_iters)
 
@@ -299,7 +299,7 @@ class PythonRaw2Benchmark(BaseBenchmark):
     ) -> float:
         if transport_url.startswith("ipc://"):
             if not _IPC_SUPPORTED:
-                raise NotImplementedError("ipc not supported for python_raw2 on Windows")
+                raise NotImplementedError("ipc not supported for python_raw_sync on Windows")
             path = _parse_ipc_url(transport_url)
             return _ipc_ops(path, msg_size, duration_s)
 
@@ -323,4 +323,4 @@ class PythonRaw2Benchmark(BaseBenchmark):
         raise ValueError(f"Unsupported URL scheme: {transport_url!r}")
 
 
-COMPETITORS["python_raw2"] = PythonRaw2Benchmark
+COMPETITORS["python_raw_sync"] = PythonRawSyncBenchmark

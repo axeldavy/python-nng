@@ -38,8 +38,8 @@ def _fmt_size(n: int) -> str:
 def _competitors_ordered(data: dict[str, Stats]) -> list[str]:
     """Return competitor names in deterministic order."""
     prefer = [
-        "python_raw",
-        "python_raw2",
+        "python_raw_sync",
+        "python_raw_async",
         "c_nng",
         "nng_sync1",
         "nng_sync2",

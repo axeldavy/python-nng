@@ -59,8 +59,8 @@ _ALL_COMPETITORS = [
     "zmq_async",
     "pynng_sync",
     "pynng_async",
-    "python_raw",
-    "python_raw2",
+    "python_raw_sync",
+    "python_raw_async",
 ]
 _ALL_TRANSPORTS = list(TRANSPORTS.keys())
 
