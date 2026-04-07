@@ -79,6 +79,7 @@ cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
         nng_socket   get_socket()
         int          peer_addr(nng_sockaddr& sa)
         int          self_addr(nng_sockaddr& sa)
+        int          get_peer_pid()
         cpp_bool     get_nodelay()
         cpp_bool     get_keepalive()
         cpp_bool     get_tls_verified()

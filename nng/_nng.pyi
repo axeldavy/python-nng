@@ -95,7 +95,7 @@ class PipeStatus(int):
     Lifecycle state of a :class:`Pipe`.
 
     * ``ADDING``  – the pipe has been created and negotiated (ADD_PRE event).
-      The :meth:`Socket.on_new_pipe` callback fires at this point.
+      The :attr:`Socket.on_new_pipe` callback fires at this point.
     * ``ACTIVE``  – the pipe is fully active (ADD_POST event).
       The pipe's own ``on_status_change`` callback fires here.
     * ``REMOVED`` – the pipe has been closed (REM_POST event).
@@ -787,7 +787,7 @@ class Pipe:
       accepts.
 
     Applications normally never create ``Pipe`` objects directly.  They appear
-    as arguments to callbacks registered with :meth:`Socket.on_new_pipe`.
+    as arguments to callbacks registered with :attr:`Socket.on_new_pipe`.
     The ``Pipe`` object is **non-owning** — closing it kicks the connection;
     the underlying socket is unaffected.
     """
@@ -1912,24 +1912,24 @@ class Socket:
         """
         ...
 
-    def on_new_pipe(self, callback: Callable[[Pipe], None] | None) -> None:
+    @property
+    def on_new_pipe(self) -> Callable[[Pipe], None] | None:
         """
-        Register a callback invoked when a new connection is negotiated.
+        Callback invoked when a new connection is negotiated.
 
         The callback is called at :attr:`PipeStatus.ADDING` – before the pipe
         is admitted to the socket pool.  Calling :meth:`Pipe.close` inside
         the callback rejects the connection entirely.
 
-        Only one callback is kept; calling this method again replaces the
-        previous one.  Pass ``None`` to disable.
+        Only one callback is kept; assigning again replaces the previous one.
+        Set to ``None`` to disable.
 
-        Parameters
-        ----------
-        callback:
-            ``(pipe: Pipe) -> None``.  Executed on the dispatcher thread;
-            keep it short and non-blocking.
+        The callback signature is ``(pipe: Pipe) -> None``.  It is executed on
+        the dispatcher thread; keep it short and non-blocking.
         """
         ...
+    @on_new_pipe.setter
+    def on_new_pipe(self, value: Callable[[Pipe], None] | None) -> None: ...
 
     def recv(self, *, nonblock: bool = False) -> Message:
         """

@@ -18,6 +18,7 @@ from asyncio import get_running_loop as _get_running_loop
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from selectors import DefaultSelector as _DefaultSelector, EVENT_READ as _EVENT_READ
 import enum as _enum
+from os import getpid as _getpid
 import socket as _pysocket
 
 from libcpp.memory cimport shared_ptr
@@ -62,15 +63,24 @@ cdef nng_sockaddr _ip_str_to_sockaddr(str ip_str):
 cdef class SocketAddr:
     """Utility for converting nng_sockaddr to a URL string."""
     cdef nng_sockaddr _sa
+    cdef int          _pid  # Cached peer PID if supported by the transport; -1 if unsupported.
 
     def __init__(self):
         raise TypeError("SocketAddr cannot be instantiated directly")
 
     @staticmethod
-    cdef SocketAddr create(nng_sockaddr sa):
+    cdef SocketAddr create(nng_sockaddr sa, int peer_pid):
         cdef SocketAddr obj = SocketAddr.__new__(SocketAddr)
         obj._sa = sa
+        obj._pid = peer_pid  # Initialize with provided peer PID
         return obj
+
+    @property
+    def pid(self) -> int | None:
+        """Peer PID, or None if not supported."""
+        if self._pid == -1:
+            return None
+        return self._pid
 
     @property
     def port(self) -> int:
@@ -89,7 +99,7 @@ cdef class SocketAddr:
     def __eq__(self, other) -> bool:
         if not isinstance(other, SocketAddr):
             return NotImplemented
-        return nng_sockaddr_equal(&self._sa, &(<SocketAddr>other)._sa)
+        return nng_sockaddr_equal(&self._sa, &(<SocketAddr>other)._sa) and self._pid == (<SocketAddr>other)._pid
 
 # ── Pipe event trampoline (GIL-free) ─────────────────────────────────────────
 
@@ -113,7 +123,7 @@ class PipeStatus(_enum.IntEnum):
     """Lifecycle state of a :class:`Pipe`.
 
     * ``ADDING``  – the pipe has been created and negotiated (ADD_PRE event).
-      The :meth:`Socket.on_new_pipe` callback fires at this point.
+      The :attr:`Socket.on_new_pipe` callback fires at this point.
     * ``ACTIVE``  – the pipe is fully active (ADD_POST event).
       The pipe's own ``on_status_change`` callback fires here.
     * ``REMOVED`` – the pipe has been closed (REM_POST event).
@@ -138,7 +148,7 @@ cdef class Pipe:
       accepts.
 
     Applications normally never create ``Pipe`` objects directly.  They appear
-    as arguments to callbacks registered with :meth:`Socket.on_new_pipe`.
+    as arguments to callbacks registered with :attr:`Socket.on_new_pipe`.
     The ``Pipe`` object is **non-owning** — closing it kicks the connection;
     the underlying socket is unaffected.
     """
@@ -242,7 +252,7 @@ cdef class Pipe:
 
         cdef nng_sockaddr sa
         check_err(self._handle.get().peer_addr(sa))
-        return SocketAddr.create(sa)
+        return SocketAddr.create(sa, self._handle.get().get_peer_pid())
 
     def get_self_addr(self) -> SocketAddr:
         """Local address."""
@@ -251,8 +261,7 @@ cdef class Pipe:
 
         cdef nng_sockaddr sa
         check_err(self._handle.get().self_addr(sa))
-        return SocketAddr.create(sa)
-
+        return SocketAddr.create(sa, _getpid())
 
     @property
     def tcp_nodelay(self) -> bool:
@@ -1544,31 +1553,32 @@ cdef class Socket:
         lock_gil_friendly(lock, self._pipe_mutex)
         return list(self._pipes)
 
-    def on_new_pipe(self, callback) -> None:
-        """Register a callback invoked when a new connection is negotiated.
+    @property
+    def on_new_pipe(self):
+        """Callback invoked when a new connection is negotiated.
 
         The callback is called at :attr:`PipeStatus.ADDING` – before the pipe
         is admitted to the socket pool.  Calling :meth:`Pipe.close` inside
         the callback rejects the connection entirely.
 
-        Only one callback is kept; calling this method again replaces the
-        previous one.  Pass ``None`` to disable.
+        Only one callback is kept; assigning again replaces the previous one.
+        Set to ``None`` to disable.
 
-        Parameters
-        ----------
-        callback:
-            ``(pipe: Pipe) -> None``.  Executed on the dispatcher thread;
-            keep it short and non-blocking.
+        The callback signature is ``(pipe: Pipe) -> None``.  It is executed on
+        the dispatcher thread; keep it short and non-blocking.
         """
         self._check()
-
-        # Process any pending pipe events (does call callbacks)
-        self.update_pipes()
-
         cdef unique_lock[DCGMutex] lock
         lock_gil_friendly(lock, self._pipe_mutex)
+        return self._on_new_pipe_cb
 
-        # Set the new callback
+    @on_new_pipe.setter
+    def on_new_pipe(self, callback):
+        self._check()
+        if not callable(callback) and callback is not None:
+            raise ValueError("on_new_pipe must be set to a callable or None")
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
         self._on_new_pipe_cb = callback
 
     def __repr__(self) -> str:
@@ -1594,6 +1604,7 @@ cdef class PairSocket(Socket):
     A pair socket can send and receive freely in both directions.  In standard
     mode it is strictly **one-to-one**: only a single pipe is active at a time.
     Messages sent while no pipe is connected are held in the send buffer.
+    If a peer disconnects, another peer can connect (which allows for reconnection)
 
     .. note::
        PAIR does **not** guarantee reliable delivery.  Although back-pressure

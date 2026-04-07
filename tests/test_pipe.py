@@ -70,7 +70,7 @@ def _active_event_for(sock) -> threading.Event:
         if pipe.status == nng.PipeStatus.ACTIVE:
             event.set()  # already active, so set the event directly
 
-    sock.on_new_pipe(_on_pipe)
+    sock.on_new_pipe = _on_pipe
     return event
 
 
@@ -201,7 +201,7 @@ def test_on_new_pipe_called_on_connect():
             received.append(pipe)
             event.set()
 
-        srv.on_new_pipe(_cb)
+        srv.on_new_pipe = _cb
         srv.add_listener(URL + "_cb").start()
         cli.add_dialer(URL + "_cb").start()
 
@@ -239,7 +239,7 @@ def test_on_new_pipe_pipe_status_is_adding_or_active():
             statuses.append(pipe.status)
             event.set()
 
-        srv.on_new_pipe(_cb)
+        srv.on_new_pipe = _cb
         srv.add_listener(URL + "_adding").start()
         cli.add_dialer(URL + "_adding").start()
 
@@ -262,8 +262,8 @@ def test_on_new_pipe_replace_callback():
             second_calls.append(pipe)
             event.set()
 
-        srv.on_new_pipe(_first)
-        srv.on_new_pipe(_second)   # replaces _first
+        srv.on_new_pipe = _first
+        srv.on_new_pipe = _second   # replaces _first
         srv.add_listener(URL + "_replace").start()
         cli.add_dialer(URL + "_replace").start()
 
@@ -280,8 +280,8 @@ def test_on_new_pipe_clear_callback():
         def _cb(pipe: nng.Pipe) -> None:
             called.set()
 
-        srv.on_new_pipe(_cb)
-        srv.on_new_pipe(None)   # clear it
+        srv.on_new_pipe = _cb
+        srv.on_new_pipe = None   # clear it
 
         srv.add_listener(URL + "_clear").start()
         cli.add_dialer(URL + "_clear").start()
@@ -306,7 +306,7 @@ def test_on_new_pipe_reject_connection():
             pipe.close()
             rejected_event.set()
 
-        srv.on_new_pipe(_reject)
+        srv.on_new_pipe = _reject
         srv.add_listener(URL + "_reject").start()
         cli.add_dialer(URL + "_reject").start(block=False)
 
@@ -350,7 +350,7 @@ def test_pipe_on_status_change_removed():
         if pipe.status == nng.PipeStatus.ACTIVE:
             active_event.set()  # already active, so set the event directly
 
-    srv.on_new_pipe(_new_pipe)
+    srv.on_new_pipe = _new_pipe
     srv.add_listener(URL + "_removed").start()
     cli.add_dialer(URL + "_removed").start()
 
@@ -385,7 +385,7 @@ def test_pipe_status_lifecycle():
         if pipe.status == nng.PipeStatus.ACTIVE:
             active_event.set()  # already active, so set the event directly
 
-    srv.on_new_pipe(_new_pipe)
+    srv.on_new_pipe = _new_pipe
     srv.add_listener(URL + "_lifecycle").start()
     cli.add_dialer(URL + "_lifecycle").start()
 
@@ -488,7 +488,7 @@ def test_on_new_pipe_called_for_each_connection():
                 if len(pipe_ids) >= N:
                     all_received.set()
 
-        srv.on_new_pipe(_cb)
+        srv.on_new_pipe = _cb
         srv.add_listener(URL + "_multi_cb").start()
 
         for _ in range(N):

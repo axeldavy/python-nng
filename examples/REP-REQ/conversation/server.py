@@ -390,7 +390,7 @@ class RepServer(ABC):
         self._tg = tg
 
         # Start listening and register the new-pipe callback to track clients.
-        self._socket.on_new_pipe(self._on_new_pipe)
+        self._socket.on_new_pipe = self._on_new_pipe
         self._socket.add_listener(url).start()
 
         # Open n_context tasks to handle n_context simultaneous clients.

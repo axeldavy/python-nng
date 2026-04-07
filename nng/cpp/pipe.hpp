@@ -45,7 +45,8 @@ public:
           _self_addr_err(nng_pipe_self_addr(p, &_self_addr)),
           _nodelay(true), _keepalive(false),
           _tls_verified(false),
-          _status(0) {
+          _status(0),
+          _peer_pid(-1) {
         // Cache TCP boolean options; ignore errors (non-TCP transports return
         // NNG_ENOTSUP and the defaults of true/false are correct in that case).
         nng_pipe_get_bool(p, NNG_OPT_TCP_NODELAY,   &_nodelay);
@@ -79,6 +80,11 @@ public:
                 }
                 nng_tls_cert_free(cert);
             }
+        }
+    
+        // Optional: capture peer PID if supported by the transport (e.g. AF_UNIX).
+        if (nng_pipe_get_int(p, NNG_OPT_PEER_PID, &_peer_pid) != 0) {
+            _peer_pid = -1; // mark as unsupported
         }
     }
 
@@ -126,6 +132,8 @@ public:
         sa = _self_addr;
         return _self_addr_err;
     }
+
+    int get_peer_pid() const noexcept { return _peer_pid; }
 
     // ── TCP options (cached, no nng calls) ────────────────────────────────
 
@@ -177,6 +185,7 @@ private:
     nng_socket   _socket;
     nng_sockaddr _peer_addr;
     int          _peer_addr_err;
+    int          _peer_pid;    // optional: NNG_OPT_PEER_PID. -1 if unsupported
     nng_sockaddr _self_addr;
     int          _self_addr_err;
     bool         _nodelay;                 // TCP_NODELAY at connection time

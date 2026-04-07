@@ -209,7 +209,7 @@ class TestNngClosed:
 
     def test_on_new_pipe_after_close(self):
         with pytest.raises(NngClosed):
-            self._closed().on_new_pipe(None)
+            self._closed().on_new_pipe = None
 
     def test_pipes_property_after_close(self):
         with pytest.raises(NngClosed):
