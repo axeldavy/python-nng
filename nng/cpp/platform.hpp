@@ -264,27 +264,26 @@ private:
     std::mutex           _mutex;
 };
 
-// ── POSIX: pipe-based wakeup ──────────────────────────────────────────────────
+// ── POSIX/Linux: eventfd-based wakeup ────────────────────────────────────────
 //
-// The read end is a raw POSIX fd, usable directly with loop.add_reader(fd, …).
-// Unlike SockDispatchQueue it cannot be wrapped in socket.socket(fileno=).
+// eventfd is lighter than pipe/socket: single fd, no byte-stream buffer,
+// counter semantics mean drain_wakeup() is always a single read (no loop).
+// Suitable for loop.add_reader(fd, …) — identical interface to pipe variant.
+//
+// Falls back to SockDispatchQueue on non-Linux POSIX (macOS, BSDs).
+
+#ifdef __linux__d
+#include <sys/eventfd.h>
 
 class PollDispatchQueue final : public IDispatchQueue {
 public:
     PollDispatchQueue() noexcept {
-        int fds[2] = {-1, -1};
-        if (pipe(fds) != 0) return;
-        _read_fd  = fds[0];
-        _write_fd = fds[1];
-        fcntl(_read_fd,  F_SETFL, O_NONBLOCK);
-        fcntl(_write_fd, F_SETFL, O_NONBLOCK);
-        fcntl(_read_fd,  F_SETFD, FD_CLOEXEC);
-        fcntl(_write_fd, F_SETFD, FD_CLOEXEC);
+        // EFD_NONBLOCK | EFD_CLOEXEC set atomically — no separate fcntl() needed.
+        _fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     }
 
     ~PollDispatchQueue() override {
-        if (_read_fd  >= 0) { close(_read_fd);  _read_fd  = -1; }
-        if (_write_fd >= 0) { close(_write_fd); _write_fd = -1; }
+        if (_fd >= 0) { close(_fd); _fd = -1; }
     }
 
     void push(uint64_t id) noexcept override {
@@ -295,8 +294,8 @@ public:
             _queue.push_back(id);
         }
         if (was_empty) {
-            char c = 1;
-            (void)write(_write_fd, &c, 1);
+            uint64_t one = 1;
+            (void)write(_fd, &one, sizeof(one));
         }
     }
 
@@ -314,19 +313,26 @@ public:
         _queue.clear();
     }
 
-    int get_read_fd() const noexcept override { return _read_fd; }
+    int get_read_fd() const noexcept override { return _fd; }
 
     void drain_wakeup() noexcept override {
-        char buf[32];
-        while (read(_read_fd, buf, sizeof(buf)) > 0) {}
+        // eventfd accumulates all writes into a single counter.
+        // One read always fully drains it — no loop required.
+        uint64_t val;
+        (void)read(_fd, &val, sizeof(val));
     }
 
 private:
-    int                  _read_fd  = -1;
-    int                  _write_fd = -1;
+    int                  _fd = -1;
     std::deque<uint64_t> _queue;
     std::mutex           _mutex;
 };
+
+#else
+// Non-Linux POSIX (macOS, BSDs): no eventfd, fall back to socketpair.
+// Pipe would also work but socketpair seems more efficient in benchmarks (at least on linux).
+using PollDispatchQueue = SockDispatchQueue;
+#endif
 
 #endif // _WIN32
 
