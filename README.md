@@ -6,7 +6,9 @@ Nanomsg-next-gen (NNG) is a messaging library written in C. It provides a small,
 
 ## Table of contents
 
+- [Why use a library like NNG rather than sockets directly?](#why-use-a-library-like-nng-rather-than-sockets-directly)
 - [Why yet another Python wrapper for NNG?](#why-yet-another-python-wrapper-for-nng)
+- [What I like about NNG](#what-i-like-about-nng)
 - [Installation](#installation)
 - [Quick start](#quick-start)
   - [REP / REQ](#rep--req)
@@ -21,6 +23,44 @@ Nanomsg-next-gen (NNG) is a messaging library written in C. It provides a small,
 - [On the use of AI](#on-the-use-of-ai)
 - [License](#license)
 
+## Why use a library like NNG rather than sockets directly?
+
+The Python standard library has a lot of available functions for communicating with sockets between processes on the same or different computers.
+
+Sockets are essentially data queues managed by the kernel and used to communicate between processes. When connecting to a website via TCP, or when receiving a video stream via UDP, you use sockets.
+
+With the Python standard library, there are essentially two main ways to use sockets:
+
+- via the `socket` library.
+- via `asyncio`.
+
+NNG provides an abstraction on top, enabling shorter and easier-to-read code.
+It provides a socket-like interface, except that:
+- The socket can listen on or bind to several interfaces at the same time.
+- It is possible to send or wait on a message before a peer has connected
+- Rather than handling individual connections with connected peers, you use a socket
+   type that has implicit handling of peers. For instance a PUB socket will send a copy of any
+   message sent to all connected peers.
+- Message semantics is directly handled (low level sockets are typically configured to receive a bytestream rather than messages). A background thread handles receiving incoming messages and queuing them (you need to quickly handle the reception of incoming messages to prevent blocking reception if the kernel queue is full).
+- Reconnection is handled automatically
+
+Underneath, NNG is similar to a dedicated thread running asyncio. Both use epoll/kqueue/iocp to quickly detect sockets ready for reading/writing. It is programmed in C and fully thread-safe.
+Because it uses a dedicated thread, you can get asynchronous I/O without asyncio. `submit_recv` returns a future that resolves when a message is received. However this Python library also integrates NNG to an existing asyncio loop.
+
+Don't use NNG if:
+- You want the lowest latency possible. In terms of latency, asyncio NNG (`arecv`) > raw asyncio > NNG (`recv`) > raw socket. If you want below, don't use Python. See [PERFORMANCE.md](PERFORMANCE.md) for detailed benchmarks and interpretation.
+- You want to share heavy amount of data. NNG is based on TCP and similar, while for video streaming or remote desktop, UDP with custom handling of lost packets is more appropriate. For inter-process large data sharing, shared memory is preferred over named pipes/unix sockets (which NNG ipc uses), as they avoid kernel copies. If you don't need to maximize performance and can accept some data copies, NNG is appropriate though.
+- You need to integrate with another protocol (HTTP, custom, etc)
+
+Use NNG if:
+- You are building distributed or multi-process applications and want well-defined message semantics without managing low-level socket details.
+- You need multiple communication patterns (request-reply, pub-sub, pipeline, pair, survey, bus) with a consistent, interchangeable API.
+- You want automatic reconnection, back-pressure, and message framing out of the box.
+- You want to mix blocking calls, `asyncio` coroutines, and `concurrent.futures` within the same codebase.
+- You need concurrent request handling on a server without the overhead of one thread per client (use contexts).
+- You want the same API for ipc, tcp or inproc endpoints
+- You don't want to manage each connection individually
+- You don't want to require asyncio to get asynchronous server/client connections, send/recv.
 
 ## Why yet another Python wrapper for NNG?
 
@@ -41,7 +81,9 @@ The result is a library with:
 
 ## What I like about NNG
 
-Having used both ZeroMQ and NNG, I found that very quickly when using ZeroMQ you need to use ROUTER sockets everywhere, which frees from contraints, but adds significant complexity that is easy to mess up (handling client failure, heartbeats, etc). On the other hand, NNG provides more handling in its sockets, and more flexibility. Need to handle several clients concurrently ? Just open several contexts on the same socket. The context system is very powerful and light. It was well-designed to keep application logic simple. Another design difference is that NNG is entirely thought to be thread safe. Closing a socket from another thread is safe, and will simply cause pending operations to fail with the exception `NngClosed`. This makes it much easier to write clean shutdown code without needing to worry about synchronization or cancellation. Finally it is worth noticing NNG has built-in TLS support.
+Having used both ZeroMQ and NNG, I found that ZeroMQ quickly pushes you toward ROUTER sockets everywhere, which removes constraints but adds significant complexity that is easy to get wrong (client failure handling, heartbeats, etc). NNG, by contrast, provides richer built-in socket behaviour and more flexibility. Need to handle several clients concurrently? Just open several contexts on the same socket. The context system is powerful and lightweight, and was well-designed to keep application logic simple.
+
+Another key difference is that NNG is designed to be fully thread-safe. Closing a socket from another thread is safe and will simply cause pending operations to fail with `NngClosed`, making it much easier to write clean shutdown code without worrying about synchronization or cancellation. NNG also has built-in TLS support.
 
 
 ## Installation
@@ -49,7 +91,7 @@ Having used both ZeroMQ and NNG, I found that very quickly when using ZeroMQ you
 The package requires Python 3.11 or later and a C++ compiler. NNG is bundled as a submodule and compiled automatically.
 
 ```bash
-pip install python-nng
+pip install nng
 ```
 
 To build from source:
@@ -199,7 +241,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The library also provides as async send/recv variant async generators `arecv_ready` and `asend_ready` which yield once each time the socket transitions from not-ready to ready, but they should be reserved for advanced use.
+The library also provides async generators `arecv_ready` and `asend_ready` for advanced use; each yields once every time the socket transitions from not-ready to ready.
 
 
 ## Transports
