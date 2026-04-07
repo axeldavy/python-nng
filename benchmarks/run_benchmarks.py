@@ -60,6 +60,7 @@ _ALL_COMPETITORS = [
     "pynng_sync",
     "pynng_async",
     "python_raw",
+    "python_raw2",
 ]
 _ALL_TRANSPORTS = list(TRANSPORTS.keys())
 

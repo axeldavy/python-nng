@@ -52,6 +52,7 @@ _COMPETITOR_MODULES = [
     "benchmarks.competitors.pynng_async",
     "benchmarks.competitors.c_nng_bench",
     "benchmarks.competitors.python_raw",
+    "benchmarks.competitors.python_raw2",
 ]
 
 Results = dict[str, dict[str, dict[int, dict[str, Stats]]]]
@@ -78,6 +79,7 @@ def _import_competitors(requested: list[str]) -> None:
             "pynng_async": "pynng_async",
             "c_nng_bench": "c_nng",
             "python_raw": "python_raw",
+            "python_raw2": "python_raw2",
         }
         friendly = name_map.get(comp_name, comp_name)
         if requested and friendly not in requested:
