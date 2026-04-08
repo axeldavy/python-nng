@@ -96,6 +96,60 @@ cdef extern from "nng/cpp/pipe.hpp" namespace "nng_cpp" nogil:
         vector[shared_ptr[PipeHandle]] get_pipes() const
         void clear()
         cpp_bool had_events()
+        void set_filter(shared_ptr[IPipeFilter] f)
+
+# ── Pipe filters ─────────────────────────────────────────────────────────────
+
+cdef extern from "nng/cpp/pipe_filter.hpp" namespace "nng_cpp" nogil:
+
+    cppclass IPipeFilter:
+        pass
+
+    # FilterMode enum class (ALLOW=0, DENY=1)
+    ctypedef int CppFilterMode "nng_cpp::FilterMode"
+    CppFilterMode CPP_FILTER_ALLOW "nng_cpp::FilterMode::ALLOW"
+    CppFilterMode CPP_FILTER_DENY  "nng_cpp::FilterMode::DENY"
+
+    # FilterKey enum class (bitmask: PID=1, IP=2, PORT=4)
+    int CPP_FK_PID  "static_cast<int>(nng_cpp::FilterKey::PID)"
+    int CPP_FK_IP   "static_cast<int>(nng_cpp::FilterKey::IP)"
+    int CPP_FK_PORT "static_cast<int>(nng_cpp::FilterKey::PORT)"
+
+    cppclass Cidr4Entry:
+        uint32_t addr
+        uint8_t  prefix_len
+
+    cppclass Cidr6Entry:
+        uint8_t  addr[16]
+        uint8_t  prefix_len
+
+    void cidr6_entry_set_addr(Cidr6Entry& e, const uint8_t* data) nogil
+
+    cppclass PortRange:
+        uint16_t lo
+        uint16_t hi
+
+    cppclass CppFirstWinsFilter "nng_cpp::FirstWinsFilter" (IPipeFilter):
+        CppFirstWinsFilter(int key_mask)
+        void reset()
+
+    shared_ptr[IPipeFilter] make_all_filter(
+        vector[shared_ptr[IPipeFilter]] v)
+
+    shared_ptr[IPipeFilter] make_any_filter(
+        vector[shared_ptr[IPipeFilter]] v)
+
+    shared_ptr[IPipeFilter] make_ip_filter(
+        CppFilterMode mode,
+        vector[Cidr4Entry] v4, vector[Cidr6Entry] v6)
+
+    shared_ptr[IPipeFilter] make_port_filter(
+        CppFilterMode mode, vector[PortRange] ranges)
+
+    shared_ptr[IPipeFilter] make_pid_filter(
+        CppFilterMode mode, vector[int] pids)
+
+    shared_ptr[IPipeFilter] make_first_wins_filter(int key_mask)
 
 
 # ── SocketHandle ─────────────────────────────────────────────────────────────

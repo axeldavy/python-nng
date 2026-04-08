@@ -191,6 +191,8 @@ PROP_TYPES: dict[tuple[str | None, str], str] = {
     (None, "listener"):       "Listener | None",
     (None, "on_new_pipe"):       "Callable[[Pipe], None] | None",
     (None, "on_status_change"): "Callable[[], None] | None",
+    (None, "pipe_filter"):       "PipeFilter | None",
+    (None, "close_on_disconnect"): "bool",
     (None, "recv_timeout"):   "int",
     (None, "send_timeout"):   "int",
     (None, "recv_buf"):       "int",
@@ -253,6 +255,16 @@ WRITABLE_PROPS: set[tuple[str, str]] = {
     ("SurveyorSocket", "send_buf"),
     ("BusSocket",    "recv_buf"),
     ("BusSocket",    "send_buf"),
+    ("Socket",       "pipe_filter"),
+    ("PairSocket",   "close_on_disconnect"),
+}
+
+# Setter-type overrides: (class_name, prop_name) → type for the setter parameter.
+# Used instead of ptype.replace(" | None", "") when the setter must accept None.
+SETTER_TYPES: dict[tuple[str, str], str] = {
+    ("Socket", "pipe_filter"):      "PipeFilter | None",
+    ("Socket", "on_new_pipe"):      "Callable[[Pipe], None] | None",
+    ("Pipe",   "on_status_change"): "Callable[[], None] | None",
 }
 
 # Full parameter-string overrides for methods where signature introspection
@@ -504,9 +516,11 @@ def _emit_property(
     lines.append(f"{indent}{I1}...")
 
     if _is_writable(class_name, prop_name):
-        # Determine setter parameter type (strip Optional for plain numeric types)
-        # Use the setter param name 'value' generically
-        setter_type = ptype.replace(" | None", "")
+        # Use explicit setter type when provided; otherwise strip '| None'.
+        setter_type = (
+            SETTER_TYPES.get((class_name, prop_name))
+            or ptype.replace(" | None", "")
+        )
         lines.append(f"{indent}@{prop_name}.setter")
         lines.append(f"{indent}def {prop_name}(self, value: {setter_type}) -> None: ...")
 
@@ -719,6 +733,77 @@ def emit_exceptions() -> list[str]:
 # PipeStatus (IntEnum)
 # ============================================================================
 
+def emit_filter_types() -> list[str]:
+    """Return stub lines for the pipe-filter type hierarchy."""
+    lines: list[str] = []
+
+    def _cls_doc(name: str) -> str | None:
+        cls = getattr(_mod, name, None)
+        return _getdoc(cls) if cls else None
+
+    def _header(cls_decl: str, doc: str | None) -> None:
+        lines.append(cls_decl)
+        if doc:
+            lines.extend(_format_doc(doc, I1))
+
+    # ── FilterMode ──────────────────────────────────────────────────────────
+    _header("class FilterMode(IntEnum):", _cls_doc("FilterMode"))
+    lines.append(f"{I1}ALLOW: int")
+    lines.append(f"{I1}DENY: int")
+    lines.append("")
+
+    # ── FilterKey ───────────────────────────────────────────────────────────
+    _header("class FilterKey(IntFlag):", _cls_doc("FilterKey"))
+    lines.append(f"{I1}PID: int")
+    lines.append(f"{I1}IP: int")
+    lines.append(f"{I1}PORT: int")
+    lines.append("")
+
+    # ── PipeFilter ──────────────────────────────────────────────────────────
+    _header("class PipeFilter:", _cls_doc("PipeFilter"))
+    lines.append(f"{I1}def __and__(self, other: PipeFilter) -> PipeFilter: ...")
+    lines.append(f"{I1}def __or__(self, other: PipeFilter) -> PipeFilter: ...")
+    lines.append("")
+
+    # ── IpFilter ────────────────────────────────────────────────────────────
+    _header("class IpFilter(PipeFilter):", _cls_doc("IpFilter"))
+    lines.append(f"{I1}def __init__(")
+    lines.append(f"{I1}{I1}self,")
+    lines.append(f"{I1}{I1}addresses: Iterable[str | Any],")
+    lines.append(f"{I1}{I1}*,")
+    lines.append(f"{I1}{I1}mode: FilterMode = ...,")
+    lines.append(f"{I1}) -> None: ...")
+    lines.append("")
+
+    # ── PortFilter ──────────────────────────────────────────────────────────
+    _header("class PortFilter(PipeFilter):", _cls_doc("PortFilter"))
+    lines.append(f"{I1}def __init__(")
+    lines.append(f"{I1}{I1}self,")
+    lines.append(f"{I1}{I1}ports: Iterable[int | tuple[int, int]],")
+    lines.append(f"{I1}{I1}*,")
+    lines.append(f"{I1}{I1}mode: FilterMode = ...,")
+    lines.append(f"{I1}) -> None: ...")
+    lines.append("")
+
+    # ── PidFilter ───────────────────────────────────────────────────────────
+    _header("class PidFilter(PipeFilter):", _cls_doc("PidFilter"))
+    lines.append(f"{I1}def __init__(")
+    lines.append(f"{I1}{I1}self,")
+    lines.append(f"{I1}{I1}pids: Iterable[int],")
+    lines.append(f"{I1}{I1}*,")
+    lines.append(f"{I1}{I1}mode: FilterMode = ...,")
+    lines.append(f"{I1}) -> None: ...")
+    lines.append("")
+
+    # ── FirstWinsFilter ─────────────────────────────────────────────────────
+    _header("class FirstWinsFilter(PipeFilter):", _cls_doc("FirstWinsFilter"))
+    lines.append(f"{I1}def __init__(self, *, on: FilterKey = ...) -> None: ...")
+    lines.append(f"{I1}def reset(self) -> None: ...")
+    lines.append("")
+
+    return lines
+
+
 def emit_pipe_status() -> list[str]:
     cls = getattr(_mod, "PipeStatus", None)
     lines: list[str] = []
@@ -781,7 +866,8 @@ _HEADER = '''\
 import concurrent.futures
 import datetime
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
+from enum import IntEnum, IntFlag
 from typing import Any, ClassVar, Self
 
 if sys.version_info >= (3, 12):
@@ -811,6 +897,13 @@ def main() -> None:
     output_parts.append("# Pipe lifecycle enum\n")
     output_parts.append("# ---------------------------------------------------------------------------\n\n")
     output_parts.append("\n".join(emit_pipe_status()))
+    output_parts.append("\n")
+
+    # Pipe connection filters
+    output_parts.append("# ---------------------------------------------------------------------------\n")
+    output_parts.append("# Pipe connection filters\n")
+    output_parts.append("# ---------------------------------------------------------------------------\n\n")
+    output_parts.append("\n".join(emit_filter_types()))
     output_parts.append("\n")
 
     # Classes

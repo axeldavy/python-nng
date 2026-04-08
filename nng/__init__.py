@@ -82,6 +82,15 @@ from nng._nng import (
     tls_engine_name,
     tls_engine_description,
 
+    # ── Pipe filters ─────────────────────────────────────────────────────
+    FilterMode,
+    FilterKey,
+    PipeFilter,
+    IpFilter,
+    PortFilter,
+    PidFilter,
+    FirstWinsFilter,
+
     # ── Utility functions ─────────────────────────────────────────────────
     version,
     random,
@@ -111,6 +120,9 @@ __all__ = [
     "TLS_AUTH_NONE", "TLS_AUTH_OPTIONAL", "TLS_AUTH_REQUIRED",
     "TLS_VERSION_1_2", "TLS_VERSION_1_3",
     "tls_engine_name", "tls_engine_description",
+    # Pipe filters
+    "FilterMode", "FilterKey", "PipeFilter",
+    "IpFilter", "PortFilter", "PidFilter", "FirstWinsFilter",
     # Utilities
     "version", "random", "initialize",
 ]

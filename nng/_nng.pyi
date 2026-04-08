@@ -4,7 +4,8 @@
 import concurrent.futures
 import datetime
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
+from enum import IntEnum, IntFlag
 from typing import Any, ClassVar, Self
 
 if sys.version_info >= (3, 12):
@@ -105,6 +106,183 @@ class PipeStatus(int):
     ADDING: ClassVar[PipeStatus]
     ACTIVE: ClassVar[PipeStatus]
     REMOVED: ClassVar[PipeStatus]
+
+# ---------------------------------------------------------------------------
+# Pipe connection filters
+# ---------------------------------------------------------------------------
+
+class FilterMode(IntEnum):
+    """
+    Whether a filter's address/PID/port list acts as a whitelist or blacklist.
+
+    * ``ALLOW`` – only connections matching the list are accepted.
+    * ``DENY``  – connections matching the list are rejected; all others pass.
+    """
+    ALLOW: int
+    DENY: int
+
+class FilterKey(IntFlag):
+    """
+    Key dimensions used by :class:`FirstWinsFilter`.
+
+    Values are powers of two and may be combined with ``|``::
+
+        FirstWinsFilter(on=FilterKey.PID | FilterKey.IP)
+
+    * ``PID``  – match on peer process ID.
+    * ``IP``   – match on peer IP address.
+    * ``PORT`` – match on peer TCP port.
+    """
+    PID: int
+    IP: int
+    PORT: int
+
+class PipeFilter:
+    """
+    Base class for all pipe connection filters.
+
+    Cannot be instantiated directly; use a concrete subclass such as
+    :class:`IpFilter`, :class:`PidFilter`, :class:`PortFilter`, or
+    :class:`FirstWinsFilter`.
+
+    Filters can be composed with Python operators::
+
+        f = IpFilter(["10.0.0.0/8"], mode=FilterMode.ALLOW) & PidFilter([1234])
+        g = IpFilter(["192.168.0.0/16"]) | IpFilter(["10.0.0.0/8"])
+
+    The composed result is also a :class:`PipeFilter` and can be assigned to
+    :attr:`Socket.pipe_filter`.
+    """
+    def __and__(self, other: PipeFilter) -> PipeFilter: ...
+    def __or__(self, other: PipeFilter) -> PipeFilter: ...
+
+class IpFilter(PipeFilter):
+    """
+    CIDR-based IP whitelist or blacklist.
+
+    *addresses* is a list of strings in CIDR notation (``"10.0.0.0/8"``,
+    ``"192.168.1.5/32"``, ``"2001:db8::/32"``).  Plain addresses without a
+    prefix length are treated as host routes (``/32`` for IPv4, ``/128`` for
+    IPv6).
+
+    Non-IP transports (IPC/inproc) do not have a peer IP address.  They always
+    pass this filter regardless of *mode* (same-machine assumption).
+
+    Parameters
+    ----------
+    addresses:
+        Iterable of CIDR strings or :class:`ipaddress.IPv4Network` /
+        :class:`ipaddress.IPv6Network` objects.
+    mode:
+        :attr:`FilterMode.ALLOW` (whitelist) or :attr:`FilterMode.DENY`
+        (blacklist).  Default: ``FilterMode.ALLOW``.
+
+    Raises
+    ------
+    ValueError
+        If any entry in *addresses* is not a valid network.
+    """
+    def __init__(
+        self,
+        addresses: Iterable[str | Any],
+        *,
+        mode: FilterMode = ...,
+    ) -> None: ...
+
+class PortFilter(PipeFilter):
+    """
+    Port-range whitelist or blacklist.
+
+    *ports* is an iterable of port specifications: each element is either
+    a plain :class:`int` (single port) or a ``(lo, hi)`` tuple (inclusive
+    range).  Ports are in the range 0–65535.
+
+    Note: non-IP transports do not have a peer port. They pass the
+    filter for both ``ALLOW`` and ``DENY`` modes.
+
+    Parameters
+    ----------
+    ports:
+        Iterable of port numbers or ``(low, high)`` inclusive ranges.
+    mode:
+        :attr:`FilterMode.ALLOW` (whitelist) or :attr:`FilterMode.DENY`
+        (blacklist).  Default: ``FilterMode.ALLOW``.
+
+    Raises
+    ------
+    ValueError
+        If any port value is outside 0–65535.
+    TypeError
+        If any element is neither an int nor a two-element tuple of int.
+    """
+    def __init__(
+        self,
+        ports: Iterable[int | tuple[int, int]],
+        *,
+        mode: FilterMode = ...,
+    ) -> None: ...
+
+class PidFilter(PipeFilter):
+    """
+    Process-ID whitelist or blacklist.
+
+    Useful only on transports that report the peer PID, namely IPC
+    (``ipc://``).  On TCP and inproc the peer PID is always
+    ``-1`` and pass the filter for both ``ALLOW`` and ``DENY`` modes.
+
+    Parameters
+    ----------
+    pids:
+        Iterable of integer process IDs.
+    mode:
+        :attr:`FilterMode.ALLOW` (whitelist) or :attr:`FilterMode.DENY`
+        (blacklist).  Default: ``FilterMode.ALLOW``.
+    """
+    def __init__(
+        self,
+        pids: Iterable[int],
+        *,
+        mode: FilterMode = ...,
+    ) -> None: ...
+
+class FirstWinsFilter(PipeFilter):
+    """
+    Lock onto the first-seen value(s) of the selected key dimension(s).
+
+    The first connection to pass establishes the anchor values for all
+    selected keys.  Every subsequent connection is accepted only if ALL
+    selected dimensions match the anchor (AND semantics).
+
+    *on* is a :class:`FilterKey` flag (or OR-combination of flags):
+
+    * ``FilterKey.PID``  – lock on the peer process ID.
+    * ``FilterKey.IP``   – lock on the peer IP address.
+    * ``FilterKey.PORT`` – lock on the peer source port.
+
+    **Transport edge cases**
+
+    ========== ============================================================
+    Key        Behaviour when transport does not expose the dimension
+    ========== ============================================================
+    ``IP``     Non-IP transports (IPC/inproc): all compare equal
+               (same-machine assumption) → never rejects on the IP dimension.
+    ``PID``    IP transports have ``pid == -1``; ``-1 == -1`` always
+               matches, so the PID dimension never rejects TCP connections.
+    ``PORT``   Non-IP transports have ``port == 0``; always equal.
+    ========== ============================================================
+
+    Parameters
+    ----------
+    on:
+        Key dimension(s) to lock on.  Default: ``FilterKey.PID | FilterKey.IP | FilterKey.PORT``.
+
+    Raises
+    ------
+    ValueError
+        If *on* contains no valid ``FilterKey`` bits.
+    """
+    def __init__(self, *, on: FilterKey = ...) -> None: ...
+    def reset(self) -> None: ...
 
 # ---------------------------------------------------------------------------
 # Core types
@@ -738,6 +916,11 @@ class SocketAddr:
         ...
 
     @property
+    def pid(self) -> Any:
+        """Peer PID, or None if not supported."""
+        ...
+
+    @property
     def port(self) -> int:
         """Port number, or 0 if not applicable."""
         ...
@@ -814,7 +997,7 @@ class Pipe:
         """Callback fired when this pipe transitions to ACTIVE or REMOVED."""
         ...
     @on_status_change.setter
-    def on_status_change(self, value: Callable[[], None]) -> None: ...
+    def on_status_change(self, value: Callable[[], None] | None) -> None: ...
 
     @property
     def socket(self) -> Socket | None:
@@ -1610,9 +1793,52 @@ class Socket:
         ...
 
     @property
+    def on_new_pipe(self) -> Callable[[Pipe], None] | None:
+        """
+        Callback invoked when a new connection is negotiated.
+
+        The callback is called at :attr:`PipeStatus.ADDING` – before the pipe
+        is admitted to the socket pool.  Calling :meth:`Pipe.close` inside
+        the callback rejects the connection entirely.
+
+        Only one callback is kept; assigning again replaces the previous one.
+        Set to ``None`` to disable.
+
+        The callback signature is ``(pipe: Pipe) -> None``.  It is executed on
+        the dispatcher thread; keep it short and non-blocking.
+        """
+        ...
+    @on_new_pipe.setter
+    def on_new_pipe(self, value: Callable[[Pipe], None] | None) -> None: ...
+
+    @property
     def peer_name(self) -> str:
         """Peer protocol name."""
         ...
+
+    @property
+    def pipe_filter(self) -> PipeFilter | None:
+        """
+        Active connection filter, or ``None`` for no filtering.
+
+        Assign any :class:`PipeFilter` instance (or a composition built with
+        ``&``, ``|``, ``~``) to reject connections before they are added to
+        the socket's pipe pool::
+
+            sock.pipe_filter = PidFilter([os.getpid()])
+            sock.pipe_filter = IpFilter(["10.0.0.0/8"]) | IpFilter(["192.168.0.0/16"])
+            sock.pipe_filter = None  # remove the filter
+
+        The filter runs **synchronously in the NNG event thread** at ADD_PRE
+        time, before the Python dispatcher is woken.  A rejected pipe never
+        enters :attr:`pipes` and its ``on_new_pipe`` callback is never called.
+
+        Only one filter is active at a time; assigning again replaces the
+        previous one.
+        """
+        ...
+    @pipe_filter.setter
+    def pipe_filter(self, value: PipeFilter | None) -> None: ...
 
     @property
     def pipes(self) -> list[Pipe]:
@@ -1912,25 +2138,6 @@ class Socket:
         """
         ...
 
-    @property
-    def on_new_pipe(self) -> Callable[[Pipe], None] | None:
-        """
-        Callback invoked when a new connection is negotiated.
-
-        The callback is called at :attr:`PipeStatus.ADDING` – before the pipe
-        is admitted to the socket pool.  Calling :meth:`Pipe.close` inside
-        the callback rejects the connection entirely.
-
-        Only one callback is kept; assigning again replaces the previous one.
-        Set to ``None`` to disable.
-
-        The callback signature is ``(pipe: Pipe) -> None``.  It is executed on
-        the dispatcher thread; keep it short and non-blocking.
-        """
-        ...
-    @on_new_pipe.setter
-    def on_new_pipe(self, value: Callable[[Pipe], None] | None) -> None: ...
-
     def recv(self, *, nonblock: bool = False) -> Message:
         """
         Receive and return a :class:`Message` (zero-copy via buffer protocol).
@@ -1991,6 +2198,7 @@ class PairSocket(Socket):
     A pair socket can send and receive freely in both directions.  In standard
     mode it is strictly **one-to-one**: only a single pipe is active at a time.
     Messages sent while no pipe is connected are held in the send buffer.
+    If a peer disconnects, another peer can connect (which allows for reconnection)
 
     .. note::
        PAIR does **not** guarantee reliable delivery.  Although back-pressure
@@ -2004,11 +2212,41 @@ class PairSocket(Socket):
     lacks hop-count headers and is required when interoperating with older
     implementations such as *libnanomsg* or *mangos*.
 
+    *Warning*: if the peer gets disconnected, messages can be lost.
+    For instance if the other peer is already connected to a different
+    peer, the connection will be rejected after being accepted for
+    a brief moment. Even though the connection will succeed for real after the
+    other peer disconnects, the messages sent during the brief moment
+    of connection will be lost. In other words, any hello/identity
+    first message may have to be resent if the pipe disconnects.
+
     Parameters
     ----------
     v0:
         Use the older Pair v0 protocol instead of the default v1.
     """
+    @property
+    def close_on_disconnect(self) -> bool:
+        """
+        Close this socket when its pipe is removed.
+
+        When ``True``, the socket automatically calls :meth:`close` the first
+        time any active pipe is removed (i.e. the peer disconnects or the
+        connection is closed from either side).  Defaults to ``False``.
+
+        This is most useful on :class:`PairSocket` servers or clients that
+        should treat a disconnect as a terminal condition rather than waiting
+        for a reconnect::
+
+            with PairSocket() as sock:
+                sock.close_on_disconnect = True
+                sock.add_listener("ipc:///tmp/myapp").start()
+                # sock.close() is called automatically on peer disconnect
+        """
+        ...
+    @close_on_disconnect.setter
+    def close_on_disconnect(self, value: bool) -> None: ...
+
     @property
     def recv_buf(self) -> int:
         """

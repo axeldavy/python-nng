@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <nng/nng.h>
+#include "pipe_filter.hpp"
 
 namespace nng_cpp {
 
@@ -126,6 +127,9 @@ public:
         return _peer_addr_err;
     }
 
+    // Returns a const reference to the cached peer address.
+    const nng_sockaddr& get_peer_addr_raw() const noexcept { return _peer_addr; }
+
     // Copies the cached local (self) address into *sa.
     // Returns the error code from the original nng_pipe_self_addr() call.
     int self_addr(nng_sockaddr& sa) const noexcept {
@@ -219,11 +223,28 @@ public:
     PipeCollection(PipeCollection&&)                 = delete;
     PipeCollection& operator=(PipeCollection&&)      = delete;
 
+    // ── Filter ─────────────────────────────────────────────────────────
+
+    /// Set (or clear) the connection filter.  Thread-safe.
+    void set_filter(std::shared_ptr<IPipeFilter> f) noexcept {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _filter = std::move(f);
+    }
+
     // ── Event handling ─────────────────────────────────────────────────
 
     void handle_event(nng_pipe pipe, nng_pipe_ev ev) {
         std::lock_guard<std::mutex> lock(_mutex);
         if (ev == NNG_PIPE_EV_ADD_PRE) {
+            // Apply the connection filter before creating a PipeHandle.
+            // A rejected pipe never enters _pipes and is invisible to Python.
+            if (_filter) {
+                PipeFilterInfo info(pipe);
+                if (!_filter->allow(info)) {
+                    nng_pipe_close(pipe);
+                    return;  // do not set _had_events: nothing visible changed
+                }
+            }
             auto pipe_h = add(pipe);
             pipe_h->set_status(NNG_PIPE_EV_ADD_PRE);
         }
@@ -231,6 +252,10 @@ public:
             auto pipe_h = find(nng_pipe_id(pipe));
             if (pipe_h) {
                 pipe_h->set_status(NNG_PIPE_EV_ADD_POST);
+                if (_filter) {
+                    PipeFilterInfo info(pipe);
+                    _filter->on_added(info);
+                }
             } else {
                 // This should never happen: we should have already added the pipe on ADD_PRE.
                 // But if it does, we can still recover by adding it now.
@@ -239,6 +264,20 @@ public:
             }
         }
         else if (ev == NNG_PIPE_EV_REM_POST) {
+            if (_filter) {
+                auto pipe_h = find(nng_pipe_id(pipe));
+                if (pipe_h) {
+                    // Use cached data, in case some of the fields are
+                    // unavailable after pipe closure.
+                    PipeFilterInfo info;
+                    info.peer_addr = pipe_h->get_peer_addr_raw();
+                    info.peer_pid  = pipe_h->get_peer_pid();
+                    info.pipe_id   = static_cast<uint32_t>(pipe_h->get_id());
+                    info.dialer    = pipe_h->get_dialer();
+                    info.listener  = pipe_h->get_listener();
+                    _filter->on_removed(info);
+                }
+            }
             remove(pipe); // sets NNG_PIPE_EV_REM_POST
         }
         _had_events = true;
@@ -302,6 +341,7 @@ private:
     std::vector<std::shared_ptr<PipeHandle>> _pipes;
     mutable std::mutex                       _mutex;
     bool                                     _had_events = false;
+    std::shared_ptr<IPipeFilter>             _filter;    ///< null = no filtering
 };
 
 } // namespace nng_cpp

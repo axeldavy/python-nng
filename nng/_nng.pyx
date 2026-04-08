@@ -224,6 +224,7 @@ include "_aio_cb_sync.pxi"        # _AioCbSync, _aio_cb_sync_trampoline
 include "_context.pxi"   # Context (nng_ctx)
 include "_dialer.pxi"    # Dialer
 include "_listener.pxi"  # Listener
+include "_pipe_filter.pxi"  # FilterMode, FilterKey, PipeFilter and subclasses
 
 include "_socket.pxi"    # Socket base + all protocol subclasses
 

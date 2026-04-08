@@ -506,6 +506,7 @@ cdef class Socket:
     cdef DCGMutex _pipe_mutex
     cdef list     _pipes            # ordered list of live Pipe objects
     cdef object   _on_new_pipe_cb   # callable(Pipe) | None (ADD_PRE)
+    cdef object   _pipe_filter_obj  # PipeFilter | None (stored for the getter)
 
     # For polling. Lazy init.
     cdef int _fd_recv
@@ -524,6 +525,7 @@ cdef class Socket:
         self._listeners = []
         self._pipes = []
         self._on_new_pipe_cb = None
+        self._pipe_filter_obj = None
         self._fd_recv = -1
         self._fd_send = -1
         self._aio_managers = _WeakKeyDictionary()
@@ -595,6 +597,10 @@ cdef class Socket:
         # Update the pipe list
         self._pipes = still_active_pipes + new_pipes
 
+        # Determine removed pipes (were active before but not after the update).
+        cdef set still_active_ids = {id(p) for p in still_active_pipes}
+        cdef list removed_pipes = [p for p in previous_pipes if id(p) not in still_active_ids]
+
         # Retrieve the pipe creation callback
         pipe_creation_cb = self._on_new_pipe_cb
 
@@ -613,6 +619,13 @@ cdef class Socket:
         for cb in pipe_update_cbs:
             try:
                 cb()
+            except Exception:
+                _print_exc()
+
+        # Notify the socket of removed pipes (subclasses may react, e.g. close_on_disconnect).
+        for pipe in removed_pipes:
+            try:
+                self._on_pipe_removed(pipe)
             except Exception:
                 _print_exc()
 
@@ -694,9 +707,11 @@ cdef class Socket:
     
         # Clear pipe tracking before closing so callbacks cannot fire after close.
         self._on_new_pipe_cb = None
+        self._pipe_filter_obj = None
         pipes = self._pipes.copy()  # copy for safe iteration after releasing lock
         self._pipes.clear()
         self._handle.get().pipe_collection().clear()
+        self._handle.get().pipe_collection().set_filter(shared_ptr[IPipeFilter]())
         lock.unlock()
         with nogil:
             self._handle.get().close()
@@ -1581,6 +1596,54 @@ cdef class Socket:
         lock_gil_friendly(lock, self._pipe_mutex)
         self._on_new_pipe_cb = callback
 
+    @property
+    def pipe_filter(self):
+        """Active connection filter, or ``None`` for no filtering.
+
+        Assign any :class:`PipeFilter` instance (or a composition built with
+        ``&``, ``|``, ``~``) to reject connections before they are added to
+        the socket's pipe pool::
+
+            sock.pipe_filter = PidFilter([os.getpid()])
+            sock.pipe_filter = IpFilter(["10.0.0.0/8"]) | IpFilter(["192.168.0.0/16"])
+            sock.pipe_filter = None  # remove the filter
+
+        The filter runs **synchronously in the NNG event thread** at ADD_PRE
+        time, before the Python dispatcher is woken.  A rejected pipe never
+        enters :attr:`pipes` and its ``on_new_pipe`` callback is never called.
+
+        Only one filter is active at a time; assigning again replaces the
+        previous one.
+        """
+        self._check()
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        return self._pipe_filter_obj
+
+    @pipe_filter.setter
+    def pipe_filter(self, value):
+        self._check()
+        if value is not None and not isinstance(value, PipeFilter):
+            raise TypeError(
+                f"pipe_filter must be a PipeFilter instance or None, "
+                f"got {type(value).__name__!r}"
+            )
+        cdef unique_lock[DCGMutex] lock
+        lock_gil_friendly(lock, self._pipe_mutex)
+        self._pipe_filter_obj = value
+        if value is None:
+            self._handle.get().pipe_collection().set_filter(
+                shared_ptr[IPipeFilter]()
+            )
+        else:
+            self._handle.get().pipe_collection().set_filter(
+                (<PipeFilter>value)._impl
+            )
+
+    cdef void _on_pipe_removed(self, Pipe pipe) noexcept:
+        """Hook called for each pipe that transitions to REMOVED. No-op base."""
+        pass
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(id={self._handle.get().raw().id if self._handle else 0})"
 
@@ -1632,6 +1695,8 @@ cdef class PairSocket(Socket):
         Use the older Pair v0 protocol instead of the default v1.
     """
 
+    cdef bint _close_on_disconnect
+
     def __cinit__(self, *, bint v0=False):
         cdef nng_socket raw_sock
         if v0:
@@ -1639,6 +1704,7 @@ cdef class PairSocket(Socket):
         else:
             check_err(nng_pair1_open(&raw_sock))
         self._handle = make_shared[SocketHandle](raw_sock)
+        self._close_on_disconnect = False
         self._setup_pipe_tracking()
 
     @property
@@ -1685,6 +1751,37 @@ cdef class PairSocket(Socket):
     def send_buf(self, int n):
         self._check()
         check_err(nng_socket_set_int(self._handle.get().raw(), NNG_OPT_SENDBUF, n))
+
+    @property
+    def close_on_disconnect(self) -> bool:
+        """Close this socket when its pipe is removed.
+
+        When ``True``, the socket automatically calls :meth:`close` the first
+        time any active pipe is removed (i.e. the peer disconnects or the
+        connection is closed from either side).  Defaults to ``False``.
+
+        This is most useful on :class:`PairSocket` servers or clients that
+        should treat a disconnect as a terminal condition rather than waiting
+        for a reconnect::
+
+            with PairSocket() as sock:
+                sock.close_on_disconnect = True
+                sock.add_listener("ipc:///tmp/myapp").start()
+                # sock.close() is called automatically on peer disconnect
+        """
+        return bool(self._close_on_disconnect)
+
+    @close_on_disconnect.setter
+    def close_on_disconnect(self, bint value):
+        self._close_on_disconnect = value
+
+    cdef void _on_pipe_removed(self, Pipe pipe) noexcept:
+        """Override: close the socket when a pipe is removed and flag is set."""
+        if self._close_on_disconnect:
+            try:
+                self.close()
+            except Exception:
+                pass
 
 
 cdef class PubSocket(Socket):
