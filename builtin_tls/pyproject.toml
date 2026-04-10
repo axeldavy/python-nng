@@ -12,7 +12,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "nng-ssl"
-version = "0.1.0"
+version = "0.2.0"
 description = "High-performance Python bindings for nng (nanomsg-next-gen) with built-in TLS support via Mbed TLS"
 readme = "README.md"
 requires-python = ">=3.11"
