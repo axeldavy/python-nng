@@ -8,6 +8,7 @@ Covers:
 - FirstWinsFilter: PID, IP, PORT dimensions; reset(); combined keys
 - PipeFilter composition: &, |, ~
 - Socket.pipe_filter assignment, clear, and enforcement
+- Filter enforcement on TCP: IpFilter ALLOW/DENY, PortFilter, PidFilter, FirstWinsFilter
 - PairSocket.close_on_disconnect behaviour
 - Error handling: bad addresses, ports, empty on-mask
 
@@ -56,6 +57,26 @@ def _connect_pair(srv_url: str, *, srv_filter=None):
     srv.add_listener(srv_url).start()
     cli.add_dialer(srv_url).start()
     return srv, cli, connected
+
+
+def _assert_no_pipe(url: str, srv_filter, *, wait: float = 0.3) -> None:
+    """Assert that *srv_filter* blocks every connection attempt within *wait* seconds.
+
+    Uses non-blocking dialer start so that a filter that rejects all connections
+    does not cause an infinite retry loop inside nng_dialer_start.
+    """
+    srv = nng.PairSocket()
+    cli = nng.PairSocket()
+    srv.pipe_filter = srv_filter
+    connected = threading.Event()
+    srv.on_new_pipe = lambda p: connected.set()
+    srv.add_listener(url).start()
+    cli.add_dialer(url).start(block=False)
+    try:
+        assert not connected.wait(wait), "expected pipe to be blocked by the filter"
+    finally:
+        cli.close()
+        srv.close()
 
 
 # ── FilterMode and FilterKey enums ────────────────────────────────────────────
@@ -303,6 +324,83 @@ def test_first_wins_filter_reset_allows_reconnect():
             cli2.close()
     finally:
         srv.close()
+
+
+# ── Filter enforcement on TCP ─────────────────────────────────────────────────
+
+def test_ip_filter_allow_tcp_matching_ip_passes():
+    """IpFilter ALLOW 127.0.0.1/32 accepts a TCP connection from loopback."""
+    f = nng.IpFilter(["127.0.0.1/32"], mode=nng.FilterMode.ALLOW)
+    srv, cli, connected = _connect_pair("tcp://127.0.0.1:15801", srv_filter=f)
+    try:
+        _wait(connected.is_set, msg="TCP connection passes IpFilter ALLOW loopback")
+    finally:
+        srv.close()
+        cli.close()
+
+
+def test_ip_filter_allow_tcp_non_matching_ip_blocks():
+    """IpFilter ALLOW 10.0.0.0/8 blocks a TCP connection from 127.0.0.1."""
+    f = nng.IpFilter(["10.0.0.0/8"], mode=nng.FilterMode.ALLOW)
+    _assert_no_pipe("tcp://127.0.0.1:15802", f)
+
+
+def test_ip_filter_deny_tcp_loopback_blocks():
+    """IpFilter DENY 127.0.0.1/32 blocks a TCP connection from loopback."""
+    f = nng.IpFilter(["127.0.0.1/32"], mode=nng.FilterMode.DENY)
+    _assert_no_pipe("tcp://127.0.0.1:15803", f)
+
+
+def test_ip_filter_deny_tcp_non_matching_passes():
+    """IpFilter DENY 10.0.0.0/8 passes a TCP connection from 127.0.0.1 (not in denied range)."""
+    f = nng.IpFilter(["10.0.0.0/8"], mode=nng.FilterMode.DENY)
+    srv, cli, connected = _connect_pair("tcp://127.0.0.1:15808", srv_filter=f)
+    try:
+        _wait(connected.is_set, msg="TCP connection passes IpFilter DENY non-matching range")
+    finally:
+        srv.close()
+        cli.close()
+
+
+def test_port_filter_allow_full_range_tcp_passes():
+    """PortFilter ALLOW 0–65535 accepts any TCP connection."""
+    f = nng.PortFilter([(0, 65535)], mode=nng.FilterMode.ALLOW)
+    srv, cli, connected = _connect_pair("tcp://127.0.0.1:15804", srv_filter=f)
+    try:
+        _wait(connected.is_set, msg="TCP connection passes PortFilter ALLOW full range")
+    finally:
+        srv.close()
+        cli.close()
+
+
+def test_port_filter_deny_full_range_tcp_blocks():
+    """PortFilter DENY 0–65535 blocks all TCP connections (all ephemeral ports denied)."""
+    f = nng.PortFilter([(0, 65535)], mode=nng.FilterMode.DENY)
+    _assert_no_pipe("tcp://127.0.0.1:15805", f)
+
+
+def test_pid_filter_allow_specific_pid_tcp_always_passes():
+    """PidFilter ALLOW [os.getpid()] still passes TCP; TCP peer PID is always -1."""
+    # TCP does not expose peer PID; nng uses -1, which is passed unconditionally
+    # by the filter regardless of the allowlist contents.
+    f = nng.PidFilter([os.getpid()])
+    srv, cli, connected = _connect_pair("tcp://127.0.0.1:15806", srv_filter=f)
+    try:
+        _wait(connected.is_set, msg="TCP connection passes PidFilter despite non-matching PID")
+    finally:
+        srv.close()
+        cli.close()
+
+
+def test_first_wins_filter_ip_tcp_locks_to_loopback():
+    """FirstWinsFilter(IP) on TCP locks onto 127.0.0.1 and accepts the first connection."""
+    f = nng.FirstWinsFilter(on=nng.FilterKey.IP)
+    srv, cli, connected = _connect_pair("tcp://127.0.0.1:15807", srv_filter=f)
+    try:
+        _wait(connected.is_set, msg="first TCP connection with FirstWinsFilter(IP)")
+    finally:
+        srv.close()
+        cli.close()
 
 
 # ── PairSocket.close_on_disconnect ────────────────────────────────────────────
