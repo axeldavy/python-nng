@@ -97,7 +97,7 @@ class SecureReqClient:
         self._box = None
         self._pipe = None
         self._socket = nng.ReqSocket()
-        self._socket.on_new_pipe(self._register_pipe)
+        self._socket.on_new_pipe = self._register_pipe
         self._client_ephem_priv, self._client_ephem_pub = generate_ephemeral_keypair()
 
     # ------------------------------------------------------------------

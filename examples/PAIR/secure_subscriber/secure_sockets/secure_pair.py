@@ -97,7 +97,7 @@ class BaseSecurePair(ABC):
         self._pair = pair
         self._timeout = timeout
         self._pipe = None
-        pair.on_new_pipe(self._register_pipe)
+        pair.on_new_pipe = self._register_pipe
 
     # ------------------------------------------------------------------
     # Abstract connection entry points (provided by each concrete subclass)

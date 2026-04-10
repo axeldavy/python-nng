@@ -1,0 +1,73 @@
+# This file is intended to be copied to the project root as pyproject.toml
+# before building the nng-ssl wheel.  In CI this is done with:
+#
+#   cp builtin_tls/pyproject.toml pyproject.toml
+#
+# All paths are relative to the project root (where the file will live when
+# used), not to this builtin_tls/ directory.
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "cython>=3.1.6", "cmake>=3.20"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nng-ssl"
+version = "0.1.0"
+description = "High-performance Python bindings for nng (nanomsg-next-gen) with built-in TLS support via Mbed TLS"
+readme = "README.md"
+requires-python = ">=3.11"
+# Mbed TLS is dual-licensed Apache-2.0 OR GPL-2.0-or-later; we use it under
+# Apache-2.0.  The wheel therefore carries both MIT (nng + python-nng) and
+# Apache-2.0 (Mbed TLS) code.
+license = "MIT AND Apache-2.0"
+license-files = [
+    "LICENSE",
+    "thirdparty/nng/LICENSE.txt",
+    "builtin_tls/mbedtls-LICENSE.txt",
+]
+keywords = ["nng", "nanomsg", "messaging", "pubsub", "ipc", "request-reply", "tls", "ssl", "mbedtls"]
+authors = [
+    { name = "Axel Davy" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Cython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/axeldavy/python-nng"
+Repository = "https://github.com/axeldavy/python-nng"
+"Bug Tracker" = "https://github.com/axeldavy/python-nng/issues"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["nng"]
+# mbedTLS is fetched at build time via FetchContent; its source is not
+# included in the sdist.  Offline sdist builds therefore require internet
+# access during the cmake configure step.
+sdist.include = ["thirdparty/nng/**", "builtin_tls/mbedtls-LICENSE.txt"]
+
+[tool.scikit-build.cmake.define]
+NNG_TESTS = "OFF"
+NNG_TOOLS = "OFF"
+NNG_ENABLE_NNGCAT = "OFF"
+BUILD_SHARED_LIBS = "OFF"
+NNG_ENABLE_TLS = "ON"
+NNG_TLS_ENGINE = "mbed"
+NNG_FETCH_MBEDTLS = "ON"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

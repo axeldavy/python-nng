@@ -94,6 +94,14 @@ The package requires Python 3.11 or later and a C++ compiler. NNG is bundled as 
 pip install nng
 ```
 
+For TLS support (`tls+tcp://`, `wss://`), install the pre-built package that bundles Mbed TLS:
+
+```bash
+pip install nng-ssl
+```
+
+The `nng-ssl` wheel is drop-in compatible with `nng`; the same `import nng` works for both.  Install one or the other, not both.
+
 To build from source:
 
 ```bash
@@ -279,12 +287,40 @@ Each pattern has well-defined send/recv semantics. Violating them — for instan
 
 ## TLS support
 
-By default, python-nng is built without TLS support. The PyPI package does not include TLS either.
+By default, `nng` is built without TLS support to keep the package pure MIT.
 
-To build with TLS, install one of the three supported backends (mbedTLS, OpenSSL, or wolfSSL) and pass the appropriate cmake options at install time:
+### Pre-built wheel with TLS
+
+The easiest way to get TLS support is the `nng-ssl` package on PyPI.  It bundles
+Mbed TLS 4.1.0 (Apache-2.0 license) compiled as a static library and requires no
+extra system dependencies:
 
 ```bash
-# mbedTLS
+pip install nng-ssl
+```
+
+`nng-ssl` installs as the `nng` Python package, so existing code is unchanged.
+Do not install both `nng` and `nng-ssl` in the same environment.
+
+### Build from source with Mbed TLS (auto-fetched)
+
+To build `nng-ssl` locally, Mbed TLS is downloaded and compiled automatically
+during the cmake configure step (internet access required at build time):
+
+```bash
+git clone --recurse-submodules https://github.com/axeldavy/python-nng.git
+cd python-nng
+cp builtin_tls/pyproject.toml pyproject.toml
+pip install .
+```
+
+### Build from source with a system TLS library
+
+You can also build `nng` (not `nng-ssl`) against an independently installed TLS
+library:
+
+```bash
+# Mbed TLS (system-installed)
 pip install . --config-settings "cmake.define.NNG_ENABLE_TLS=ON" --config-settings "cmake.define.NNG_TLS_ENGINE=mbed"
 
 # OpenSSL
