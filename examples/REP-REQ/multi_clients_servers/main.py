@@ -86,7 +86,7 @@ def run(M: int, N: int, K: int, transport: str, base_port: int) -> None:
     client_procs: list[subprocess.Popen[bytes]] = []
     for i in range(N):
         cmd = [
-            py, os.path.join(here, "client.py"),
+            py, os.path.join(here, "worker.py"),
             "--id", str(i),
             *url_flags,
             "--requests", str(K),
